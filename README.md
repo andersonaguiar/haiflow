@@ -34,8 +34,6 @@ GET /responses/:id <─────────────┘
 
 ## Quick start
 
-### Local
-
 ```bash
 git clone https://github.com/andersonaguiar/haiflow.git
 cd haiflow
@@ -106,6 +104,7 @@ cp .env.example .env
 | `PORT` | `3333` | HTTP server port |
 | `HAIFLOW_DATA_DIR` | `/tmp/haiflow` | Directory for session state, queues, and responses |
 | `HAIFLOW_PORT` | `3333` | Port used by hook scripts (set if different from PORT) |
+| `N8N_API_KEY` | — | n8n API key for workflow integration |
 
 ## API
 
@@ -240,8 +239,10 @@ ct '{"prompt": "explain the error in the logs", "id": "debug-1"}'
 ```
 haiflow/
 ├── src/
-│   ├── index.ts              # Bun HTTP server
-│   └── index.test.ts         # Tests
+│   └── index.ts              # Bun HTTP server
+├── tests/
+│   ├── api.test.ts           # API integration tests
+│   └── index.test.ts         # Unit tests
 ├── bin/
 │   ├── haiflow.ts            # CLI wrapper
 │   └── check-deps.sh         # Dependency checker
@@ -266,7 +267,7 @@ haiflow/
 | `bun run dev` | Start server with hot reload |
 | `bun run start` | Start server |
 | `bun run check` | Check all dependencies |
-| `bun run test` | Run tests |
+| `bun test` | Run tests |
 
 ## License
 
