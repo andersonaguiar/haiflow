@@ -271,6 +271,17 @@ describe("GET /responses/:id", () => {
     expect(data.error).toBe("Response not found");
   });
 
+  test("does not allow encoded traversal-style response IDs", async () => {
+    writeState("resp-traversal", {
+      status: "idle",
+      since: "2025-01-01T00:00:00Z",
+    });
+
+    const { status, data } = await api("/responses/%2E%2E%2Fstate?session=resp-traversal");
+    expect(status).toBe(404);
+    expect(data.error).toBe("Response not found");
+  });
+
   test("returns completed response", async () => {
     writeResponse("get-resp", "my-task", {
       id: "my-task",

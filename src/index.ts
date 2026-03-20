@@ -50,6 +50,14 @@ function sanitizeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 128) || generateId();
 }
 
+function responseFile(session: string, id: string): string {
+  const p = sessionPaths(session);
+  // Route params are URL-decoded before they reach us, so encoded values like
+  // "%2E%2E%2Fstate" become "../state". Reusing sanitizeId here keeps response
+  // reads and writes inside the responses directory and matches trigger IDs.
+  return `${p.responses}/${sanitizeId(id)}.json`;
+}
+
 function readState(session: string): State {
   const p = sessionPaths(session);
   if (!existsSync(p.state)) {
@@ -121,7 +129,7 @@ function isTmuxRunning(session: string): boolean {
 
 function saveResponse(session: string, taskId: string, transcriptPath?: string, lastMessage?: string) {
   if (!taskId) return;
-  const p = sessionPaths(session);
+  const file = responseFile(session, taskId);
 
   if (transcriptPath && existsSync(transcriptPath)) {
     try {
@@ -134,7 +142,7 @@ function saveResponse(session: string, taskId: string, transcriptPath?: string, 
           transcriptPath]).stdout.toString()
       );
       if (Array.isArray(messages) && messages.length > 0) {
-        writeFileSync(`${p.responses}/${taskId}.json`, JSON.stringify({
+        writeFileSync(file, JSON.stringify({
           id: taskId, completed_at: new Date().toISOString(), messages,
         }, null, 2));
         return;
@@ -143,7 +151,7 @@ function saveResponse(session: string, taskId: string, transcriptPath?: string, 
   }
 
   if (lastMessage) {
-    writeFileSync(`${p.responses}/${taskId}.json`, JSON.stringify({
+    writeFileSync(file, JSON.stringify({
       id: taskId, completed_at: new Date().toISOString(), messages: [lastMessage],
     }, null, 2));
   }
@@ -320,8 +328,7 @@ const server = Bun.serve({
       GET: (req) => {
         const session = getSessionParam(req);
         const id = req.params.id;
-        const p = sessionPaths(session);
-        const file = `${p.responses}/${id}.json`;
+        const file = responseFile(session, id);
         if (!existsSync(file)) {
           const state = readState(session);
           if (state.currentTaskId === id && state.status === "busy") {
