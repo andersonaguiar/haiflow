@@ -2,7 +2,6 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlink
 
 const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
-const TMUX_PREFIX = process.env.TMUX_PREFIX ?? "claude";
 
 mkdirSync(BASE_DIR, { recursive: true });
 
@@ -40,9 +39,7 @@ function sessionPaths(session: string) {
 }
 
 function tmuxName(session: string) {
-  if (session === "default") return TMUX_PREFIX;
-  if (session.startsWith(`${TMUX_PREFIX}-`)) return session;
-  return `${TMUX_PREFIX}-${session}`;
+  return session;
 }
 
 function generateId(): string {

@@ -46,18 +46,6 @@ check_optional() {
 echo ""
 echo "Optional:"
 echo ""
-if command -v docker &> /dev/null; then
-  VERSION=$(docker --version 2>&1 | head -1)
-  printf "  %-10s %s\n" "docker" "$VERSION"
-  # Check if CLI can talk to the Docker engine
-  if ! docker info &> /dev/null && ! DOCKER_API_VERSION=1.44 docker info &> /dev/null; then
-    printf "             Docker engine is not running\n"
-  elif ! docker info &> /dev/null; then
-    printf "             Docker CLI is outdated — update Docker Desktop to fix API mismatch\n"
-  fi
-else
-  printf "  %-10s not installed\n" "docker"
-fi
 
 # n8n can be installed as CLI or run via Docker
 if command -v n8n &> /dev/null; then

@@ -12,10 +12,7 @@
     "start": "bun run src/index.ts",
     "setup": "bun run bin/haiflow.ts setup",
     "check": "bash bin/check-deps.sh",
-    "test": "bun test",
-    "docker": "docker compose up -d --build",
-    "docker:dev": "docker compose up --build",
-    "docker:stop": "docker compose down"
+    "test": "bun test"
   },
   "repository": {
     "type": "git",

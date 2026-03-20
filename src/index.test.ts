@@ -64,24 +64,11 @@ describe("sanitizeId", () => {
 });
 
 describe("tmuxName", () => {
-  const PREFIX = "claude";
-  const tmuxName = (session: string) => {
-    if (session === "default") return PREFIX;
-    if (session.startsWith(`${PREFIX}-`)) return session;
-    return `${PREFIX}-${session}`;
-  };
+  const tmuxName = (session: string) => session;
 
-  test("default session uses prefix only", () => {
-    expect(tmuxName("default")).toBe("claude");
-  });
-
-  test("named session gets prefix", () => {
-    expect(tmuxName("worker")).toBe("claude-worker");
-    expect(tmuxName("admin")).toBe("claude-admin");
-  });
-
-  test("no double prefix", () => {
-    expect(tmuxName("claude-worker")).toBe("claude-worker");
-    expect(tmuxName("claude-tmt-daily")).toBe("claude-tmt-daily");
+  test("uses session name directly", () => {
+    expect(tmuxName("default")).toBe("default");
+    expect(tmuxName("worker")).toBe("worker");
+    expect(tmuxName("my-project")).toBe("my-project");
   });
 });

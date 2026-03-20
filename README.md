@@ -42,14 +42,6 @@ bun run setup    # installs Claude Code hooks
 bun run dev      # starts server with hot reload
 ```
 
-### Docker
-
-```bash
-git clone https://github.com/andersonaguiar/haiflow.git
-cd haiflow
-docker compose up -d --build
-```
-
 ### Try it out
 
 ```bash
@@ -67,7 +59,7 @@ curl -X POST http://localhost:3333/trigger \
 curl -s "http://localhost:3333/responses/my-task?session=worker" | jq .
 
 # Watch Claude work (read-only)
-tmux attach -t claude-worker -r
+tmux attach -t worker -r
 
 # Stop the session
 curl -X POST http://localhost:3333/session/stop \
@@ -111,7 +103,6 @@ cp .env.example .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3333` | HTTP server port |
-| `TMUX_PREFIX` | `claude` | Prefix for tmux session names |
 | `HAIFLOW_DATA_DIR` | `/tmp/haiflow` | Directory for session state, queues, and responses |
 | `HAIFLOW_PORT` | `3333` | Port used by hook scripts (set if different from PORT) |
 
@@ -261,8 +252,6 @@ haiflow/
 ├── examples/
 │   ├── n8n-workflows/        # Importable n8n workflow JSON files
 │   └── curl-examples.sh      # Quick start curl scripts
-├── Dockerfile
-├── docker-compose.yml
 ├── .env.example
 ├── package.json
 └── LICENSE
@@ -277,9 +266,6 @@ haiflow/
 | `bun run start` | Start server |
 | `bun run check` | Check all dependencies |
 | `bun run test` | Run tests |
-| `bun run docker` | Build and run with Docker |
-| `bun run docker:dev` | Build and run in foreground |
-| `bun run docker:stop` | Stop Docker container |
 
 ## License
 
