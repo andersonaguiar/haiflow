@@ -18,7 +18,7 @@ Build integrations between services using **haiflow** as the AI orchestration la
 **Project references** (read these for API details, don't duplicate):
 - `README.md` — Full API docs, setup, and architecture
 - `src/index.ts` — Endpoint implementations and types
-- `examples/n8n-workflows/` — Existing n8n workflow templates
+- `examples/chained-calc/` — Chained calc workflow example
 
 ## Workflow
 
@@ -119,7 +119,7 @@ Confirm before building.
 
 ### n8n Path
 
-Read `examples/n8n-workflows/` for existing haiflow + n8n templates. Use them as the base.
+Read `examples/chained-calc/` for existing haiflow + n8n templates. Use them as the base.
 
 The core n8n + haiflow pattern (uses SSE streaming, no polling loop):
 1. **Trigger node** — webhook, schedule, or service event
@@ -133,7 +133,7 @@ Use n8n MCP tools to deploy:
 - `mcp__n8n-mcp__get_workflow_details` — inspect
 - `mcp__n8n-mcp__execute_workflow` — create/execute
 
-If n8n MCP unavailable, save workflow JSON to `examples/n8n-workflows/` for manual import.
+If n8n MCP unavailable, save workflow JSON to `examples/chained-calc/` for manual import.
 
 ### Raw Code Path
 
@@ -188,7 +188,7 @@ Read `src/index.ts` for the full endpoint API, types, and status codes.
 ## Error Handling
 
 - context7 miss → try alternate library names, then web search
-- n8n MCP unavailable → generate importable workflow JSON in `examples/n8n-workflows/`
+- n8n MCP unavailable → generate importable workflow JSON in `examples/chained-calc/`
 - haiflow offline → remind user to start it and the Claude session
 - Auth unclear → ask the user, don't guess
 - Claude busy → haiflow auto-queues; integrations should handle 202 responses

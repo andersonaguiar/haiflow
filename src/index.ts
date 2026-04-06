@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync, statSync } from "fs";
 import dashboard from "./dashboard/index.html";
 import {
   sanitizeSession, sanitizeId, generateId, tmuxName,
@@ -129,41 +129,40 @@ interface PipelineConfig {
 
 const EMPTY_PIPELINE: PipelineConfig = { topics: {}, emitters: {} };
 
+let cachedPipeline: PipelineConfig | null = null;
+let cachedPipelineMtime = 0;
+let cachedPipelineSize = 0;
+
 function readPipeline(): PipelineConfig {
   const file = `${BASE_DIR}/pipeline.json`;
-  if (!existsSync(file)) return EMPTY_PIPELINE;
+  if (!existsSync(file)) {
+    cachedPipeline = null;
+    cachedPipelineMtime = 0;
+    cachedPipelineSize = 0;
+    return EMPTY_PIPELINE;
+  }
+  const stat = statSync(file);
+  if (cachedPipeline && stat.mtimeMs === cachedPipelineMtime && stat.size === cachedPipelineSize) return cachedPipeline;
   try {
     const raw = readFileSync(file, "utf-8");
     const config = JSON.parse(raw);
-    return { topics: config.topics ?? {}, emitters: config.emitters ?? {} };
+    cachedPipeline = { topics: config.topics ?? {}, emitters: config.emitters ?? {} };
+    cachedPipelineMtime = stat.mtimeMs;
+    cachedPipelineSize = stat.size;
+    return cachedPipeline;
   } catch {
     log("warn", "pipeline_config_invalid", { file });
     return EMPTY_PIPELINE;
   }
 }
 
-async function handlePipelineEvent(
+async function deliverToSubscribers(
   topic: string,
-  event: { session: string; taskId: string; message: string; chain?: string[] },
-  opts?: { skipRecording?: boolean; existingEventId?: string }
+  topicConfig: TopicConfig,
+  event: { session: string; taskId: string; message: string },
+  chain: string[],
+  eventId?: string
 ) {
-  const pipeline = readPipeline();
-  const topicConfig = pipeline.topics[topic];
-  if (!topicConfig) return;
-
-  // Record event in Redis (skip during replay to avoid duplicates)
-  const eventId = opts?.existingEventId ?? (
-    opts?.skipRecording ? undefined : await eventBus.recordEvent({
-      topic,
-      message: event.message,
-      sourceSession: event.session,
-      taskId: event.taskId,
-      chain: event.chain,
-    })
-  );
-
-  const chain = [...(event.chain ?? []), event.session];
-
   for (const sub of topicConfig.subscribers ?? []) {
     if (sub.enabled === false) {
       if (eventId) await eventBus.recordDelivery(eventId, sub.session, "session", "skipped");
@@ -204,7 +203,6 @@ async function handlePipelineEvent(
     const state = readState(subscriberSession);
 
     if (state.status === "offline") {
-      // Queue anyway so it's picked up when session starts
       const queue = readQueue(subscriberSession);
       queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain });
       writeQueue(subscriberSession, queue);
@@ -234,11 +232,17 @@ async function handlePipelineEvent(
     log("info", "pipeline_dispatched", { topic, subscriber: subscriberSession, taskId });
     if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "delivered");
   }
+}
 
-  // Fire outbound webhooks
+function deliverToWebhooks(
+  topic: string,
+  topicConfig: TopicConfig,
+  event: { session: string; taskId: string; message: string },
+  eventId?: string
+) {
   for (const wh of topicConfig.webhooks ?? []) {
     if (wh.enabled === false) {
-      if (eventId) await eventBus.recordDelivery(eventId, `webhook:${wh.url}`, "webhook", "skipped");
+      if (eventId) eventBus.recordDelivery(eventId, `webhook:${wh.url}`, "webhook", "skipped");
       continue;
     }
 
@@ -250,7 +254,7 @@ async function handlePipelineEvent(
       publishedAt: new Date().toISOString(),
     };
 
-    if (eventId) await eventBus.recordDelivery(eventId, `webhook:${wh.url}`, "webhook", "pending");
+    if (eventId) eventBus.recordDelivery(eventId, `webhook:${wh.url}`, "webhook", "pending");
 
     const whSubscriber = `webhook:${wh.url}`;
     fetch(wh.url, {
@@ -272,6 +276,32 @@ async function handlePipelineEvent(
       log("error", "pipeline_webhook_failed", { topic, url: wh.url, error: String(err) });
     });
   }
+}
+
+async function handlePipelineEvent(
+  topic: string,
+  event: { session: string; taskId: string; message: string; chain?: string[] },
+  opts?: { skipRecording?: boolean; existingEventId?: string }
+) {
+  const pipeline = readPipeline();
+  const topicConfig = pipeline.topics[topic];
+  if (!topicConfig) return;
+
+  // Record event in Redis (skip during replay to avoid duplicates)
+  const eventId = opts?.existingEventId ?? (
+    opts?.skipRecording ? undefined : await eventBus.recordEvent({
+      topic,
+      message: event.message,
+      sourceSession: event.session,
+      taskId: event.taskId,
+      chain: event.chain,
+    })
+  );
+
+  const chain = [...(event.chain ?? []), event.session];
+
+  await deliverToSubscribers(topic, topicConfig, event, chain, eventId);
+  deliverToWebhooks(topic, topicConfig, event, eventId);
 
   if (eventId) await eventBus.finalizeEvent(eventId);
 }

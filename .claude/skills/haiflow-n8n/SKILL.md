@@ -23,8 +23,7 @@ You are an expert in both **n8n** (workflow automation) and **haiflow** (Claude 
 - `README.md` — haiflow setup, architecture, and examples
 - `API.md` — haiflow endpoint reference
 - `src/index.ts` — haiflow server implementation
-- `examples/n8n-workflows/` — Existing n8n + haiflow workflow templates
-- `examples/pipeline.json` — Multi-agent pipeline configuration example
+- `examples/chained-calc/` — Chained calc n8n workflow steps and pipeline config
 
 ---
 
@@ -974,7 +973,7 @@ curl -s -X POST "$N8N_URL/api/v1/workflows/{id}/deactivate" \
 
 ### Deployment pattern
 When building workflows for the user:
-1. Generate workflow JSON files in `examples/n8n-workflows/`
+1. Generate workflow JSON files in `examples/chained-calc/`
 2. Use `jq '. + {settings: {}}' file.json` to add required settings field
 3. POST to `/api/v1/workflows` to create
 4. POST to `/api/v1/workflows/{id}/activate` for webhook-triggered workflows

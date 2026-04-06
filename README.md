@@ -216,12 +216,11 @@ Haiflow works with any tool that can make HTTP requests. Here are a few examples
 
 ### n8n (example workflow templates included)
 
-Import the workflow templates from `examples/n8n-workflows/`:
-- `trigger-prompt.json` — Webhook that forwards prompts to haiflow
-- `scheduled-trigger-with-polling.json` — Scheduled daily trigger with SSE streaming
-- `pr-review-bot.json` — Automated PR review bot using `/code-review`
-- `agent-pipeline.json` — Trigger the first agent in a pipeline chain
-- `pipeline-notify-on-review.json` — Poll pipeline events and notify Slack when a code review completes
+Import the chained calc workflow from `examples/chained-calc/`:
+- `chained-calc-step1.json` — Step 1: receive a number and double it
+- `chained-calc-step2.json` — Step 2: receive doubled result and add 10
+- `chained-calc-step3.json` — Step 3: receive final result and format output
+- `pipeline-calc-chain.json` — Pipeline configuration that wires them together
 
 ### Cron job
 
@@ -393,7 +392,7 @@ curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
 - **Webhook retry**: Failed webhook deliveries are retried with exponential backoff (max 5 attempts)
 - **Event replay**: Unprocessed events are replayed on server restart
 
-See `examples/pipeline.json` for a full design→developer→reviewer→QA example.
+See `examples/chained-calc/pipeline-calc-chain.json` for a chained calc workflow example.
 
 ## Project structure
 
@@ -421,9 +420,7 @@ haiflow/
 │   ├── stop.sh               # Stop hook
 │   └── session-end.sh        # SessionEnd hook
 ├── examples/
-│   ├── n8n-workflows/        # Importable n8n workflow JSON files
-│   ├── pipeline.json         # Example pipeline config (design→dev→review→QA)
-│   └── curl-examples.sh      # Quick start curl scripts
+│   └── chained-calc/         # Chained calc workflow (n8n steps + pipeline config)
 ├── assets/
 │   └── demo.gif              # Demo recording
 ├── API.md                    # Full API reference

@@ -141,7 +141,7 @@ Clear all queued prompts.
 
 The pipeline system enables event-driven agent chains. When an agent finishes a task, it can emit an event to a topic. Other agents subscribed to that topic automatically receive the output as their next prompt.
 
-Configuration is via `pipeline.json` in your `HAIFLOW_DATA_DIR`. See `examples/pipeline.json` for a full example. Topics support two subscriber types: **agent sessions** (receive a rendered prompt) and **outbound webhooks** (receive a JSON POST with the event payload).
+Configuration is via `pipeline.json` in your `HAIFLOW_DATA_DIR`. See `examples/chained-calc/pipeline-calc-chain.json` for an example. Topics support two subscriber types: **agent sessions** (receive a rendered prompt) and **outbound webhooks** (receive a JSON POST with the event payload).
 
 ### `GET /pipeline`
 
