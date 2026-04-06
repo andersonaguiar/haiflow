@@ -95,7 +95,7 @@ describe("GET /pipeline", () => {
     expect(status).toBe(200);
     expect(data.topics).toEqual({});
     expect(data.emitters).toEqual({});
-    expect(data.redis).toBe(false);
+    expect(data.redis).toBe(true);
     expect(Array.isArray(data.recentEvents)).toBe(true);
   });
 
@@ -550,6 +550,96 @@ describe("pipeline webhooks", () => {
       await Bun.sleep(300);
       expect(receivedHeaders["x-pipeline-secret"]).toBe("s3cret");
       expect(receivedHeaders["content-type"]).toBe("application/json");
+    } finally {
+      webhookServer.stop();
+    }
+  });
+});
+
+// --- Webhook-only topics (no subscribers) ---
+
+describe("webhook-only topics", () => {
+  test("publishes to topic with webhooks but no subscribers field", async () => {
+    let received: any = null;
+    const webhookServer = Bun.serve({
+      port: 19879,
+      routes: {
+        "/hook": {
+          POST: async (req) => {
+            received = await req.json();
+            return Response.json({ ok: true });
+          },
+        },
+      },
+      fetch: () => new Response("not found", { status: 404 }),
+    });
+
+    try {
+      writePipeline({
+        topics: {
+          "wh.only": {
+            description: "Topic with webhooks but no subscribers array",
+            webhooks: [
+              { url: "http://localhost:19879/hook", method: "POST" },
+            ],
+          },
+        },
+        emitters: {},
+      });
+
+      const { status, data } = await api("/publish", "POST", {
+        topic: "wh.only",
+        message: "webhook-only test",
+      });
+      expect(status).toBe(200);
+      expect(data.published).toBe(true);
+
+      await Bun.sleep(300);
+      expect(received).not.toBeNull();
+      expect(received.topic).toBe("wh.only");
+      expect(received.message).toBe("webhook-only test");
+    } finally {
+      webhookServer.stop();
+    }
+  });
+
+  test("publishes to topic with empty subscribers array and webhooks", async () => {
+    let received: any = null;
+    const webhookServer = Bun.serve({
+      port: 19880,
+      routes: {
+        "/hook": {
+          POST: async (req) => {
+            received = await req.json();
+            return Response.json({ ok: true });
+          },
+        },
+      },
+      fetch: () => new Response("not found", { status: 404 }),
+    });
+
+    try {
+      writePipeline({
+        topics: {
+          "wh.empty-subs": {
+            subscribers: [],
+            webhooks: [
+              { url: "http://localhost:19880/hook" },
+            ],
+          },
+        },
+        emitters: {},
+      });
+
+      const { status } = await api("/publish", "POST", {
+        topic: "wh.empty-subs",
+        message: "empty subs test",
+      });
+      expect(status).toBe(200);
+
+      await Bun.sleep(300);
+      expect(received).not.toBeNull();
+      expect(received.message).toBe("empty subs test");
     } finally {
       webhookServer.stop();
     }

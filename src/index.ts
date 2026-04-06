@@ -1,11 +1,11 @@
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync } from "fs";
-import { RedisClient } from "bun";
 import dashboard from "./dashboard/index.html";
 import {
   sanitizeSession, sanitizeId, generateId, tmuxName,
   validateStructural, buildSecurityPreamble,
   isAllowedTranscriptPath, renderTemplate,
 } from "./utils";
+import { EventBus } from "./events";
 
 const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
@@ -22,6 +22,7 @@ if (!API_KEY) {
 }
 
 mkdirSync(BASE_DIR, { recursive: true });
+const eventBus = await EventBus.create(REDIS_URL);
 
 // --- Structured logging ---
 
@@ -141,77 +142,40 @@ function readPipeline(): PipelineConfig {
   }
 }
 
-// --- Redis pub/sub ---
-
-let redisPublisher: RedisClient | null = null;
-let redisSubscriber: RedisClient | null = null;
-let redisAvailable = false;
-
-// Recent pipeline events for introspection (ring buffer)
-const pipelineEvents: Array<{
-  topic: string;
-  sourceSession: string;
-  taskId: string;
-  subscribers: string[];
-  publishedAt: string;
-}> = [];
-const MAX_EVENTS = 50;
-
-function trackEvent(event: typeof pipelineEvents[number]) {
-  pipelineEvents.push(event);
-  if (pipelineEvents.length > MAX_EVENTS) pipelineEvents.shift();
-}
-
-async function initRedis() {
-  try {
-    redisPublisher = new RedisClient(REDIS_URL);
-    await redisPublisher.connect();
-    redisSubscriber = await redisPublisher.duplicate();
-
-    const pipeline = readPipeline();
-    const topicNames = Object.keys(pipeline.topics);
-
-    for (const topic of topicNames) {
-      await redisSubscriber.subscribe(`haiflow:${topic}`, (rawMessage: string) => {
-        try {
-          const event = JSON.parse(rawMessage);
-          // Use the channel topic, not the message body — prevents spoofing
-          handlePipelineEvent(topic, event);
-        } catch {
-          log("error", "pipeline_message_parse_failed", { topic });
-        }
-      });
-    }
-
-    redisAvailable = true;
-    const safeUrl = REDIS_URL.replace(/:\/\/[^@]+@/, "://*****@");
-    log("info", "redis_connected", { url: safeUrl, topics: topicNames });
-  } catch (err) {
-    const safeUrl = REDIS_URL.replace(/:\/\/[^@]+@/, "://*****@");
-    log("warn", "redis_unavailable", { url: safeUrl, error: String(err) });
-    redisAvailable = false;
-  }
-}
-
-function handlePipelineEvent(
+async function handlePipelineEvent(
   topic: string,
-  event: { session: string; taskId: string; message: string; chain?: string[] }
+  event: { session: string; taskId: string; message: string; chain?: string[] },
+  opts?: { skipRecording?: boolean; existingEventId?: string }
 ) {
   const pipeline = readPipeline();
   const topicConfig = pipeline.topics[topic];
   if (!topicConfig) return;
 
-  const chain = [...(event.chain ?? []), event.session];
-  const subscriberNames: string[] = [];
+  // Record event in Redis (skip during replay to avoid duplicates)
+  const eventId = opts?.existingEventId ?? (
+    opts?.skipRecording ? undefined : await eventBus.recordEvent({
+      topic,
+      message: event.message,
+      sourceSession: event.session,
+      taskId: event.taskId,
+      chain: event.chain,
+    })
+  );
 
-  for (const sub of topicConfig.subscribers) {
-    if (sub.enabled === false) continue;
+  const chain = [...(event.chain ?? []), event.session];
+
+  for (const sub of topicConfig.subscribers ?? []) {
+    if (sub.enabled === false) {
+      if (eventId) await eventBus.recordDelivery(eventId, sub.session, "session", "skipped");
+      continue;
+    }
 
     const subscriberSession = sanitizeSession(sub.session);
 
     // Circular protection: skip if this session is already in the chain
     if (chain.includes(subscriberSession)) {
       log("warn", "pipeline_circular_skipped", { topic, subscriber: subscriberSession, chain });
+      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "skipped");
       continue;
     }
 
@@ -224,6 +188,7 @@ function handlePipelineEvent(
 
     if (prompt.length > MAX_PROMPT_SIZE) {
       log("warn", "pipeline_prompt_too_large", { topic, subscriber: subscriberSession, size: prompt.length });
+      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "skipped");
       continue;
     }
 
@@ -231,6 +196,7 @@ function handlePipelineEvent(
     const validation = validateStructural(prompt);
     if (!validation.ok) {
       log("warn", "pipeline_prompt_rejected", { topic, subscriber: subscriberSession, reason: validation.reason });
+      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "skipped");
       continue;
     }
 
@@ -243,7 +209,7 @@ function handlePipelineEvent(
       queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain });
       writeQueue(subscriberSession, queue);
       log("warn", "pipeline_subscriber_offline", { topic, subscriber: subscriberSession, taskId });
-      subscriberNames.push(subscriberSession);
+      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "queued");
       continue;
     }
 
@@ -252,7 +218,7 @@ function handlePipelineEvent(
       queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain });
       writeQueue(subscriberSession, queue);
       log("info", "pipeline_queued", { topic, subscriber: subscriberSession, taskId });
-      subscriberNames.push(subscriberSession);
+      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "queued");
       continue;
     }
 
@@ -266,12 +232,15 @@ function handlePipelineEvent(
     });
     sendToTmux(subscriberSession, prompt);
     log("info", "pipeline_dispatched", { topic, subscriber: subscriberSession, taskId });
-    subscriberNames.push(subscriberSession);
+    if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "delivered");
   }
 
   // Fire outbound webhooks
   for (const wh of topicConfig.webhooks ?? []) {
-    if (wh.enabled === false) continue;
+    if (wh.enabled === false) {
+      if (eventId) await eventBus.recordDelivery(eventId, `webhook:${wh.url}`, "webhook", "skipped");
+      continue;
+    }
 
     const payload = {
       topic,
@@ -281,26 +250,30 @@ function handlePipelineEvent(
       publishedAt: new Date().toISOString(),
     };
 
+    if (eventId) await eventBus.recordDelivery(eventId, `webhook:${wh.url}`, "webhook", "pending");
+
+    const whSubscriber = `webhook:${wh.url}`;
     fetch(wh.url, {
       method: wh.method ?? "POST",
       headers: { "Content-Type": "application/json", ...wh.headers },
       body: JSON.stringify(payload),
-    }).then(() => {
+    }).then(async () => {
+      if (eventId) await eventBus.updateDelivery(eventId, whSubscriber, { status: "delivered" });
       log("info", "pipeline_webhook_sent", { topic, url: wh.url });
-    }).catch((err) => {
+    }).catch(async (err) => {
+      if (eventId) {
+        const nextRetry = new Date(Date.now() + 60_000).toISOString();
+        await eventBus.updateDelivery(eventId, whSubscriber, {
+          status: "failed",
+          lastError: String(err),
+          nextRetryAt: nextRetry,
+        });
+      }
       log("error", "pipeline_webhook_failed", { topic, url: wh.url, error: String(err) });
     });
-
-    subscriberNames.push(`webhook:${wh.url}`);
   }
 
-  trackEvent({
-    topic,
-    sourceSession: event.session,
-    taskId: event.taskId,
-    subscribers: subscriberNames,
-    publishedAt: new Date().toISOString(),
-  });
+  if (eventId) await eventBus.finalizeEvent(eventId);
 }
 
 async function publishEvent(
@@ -322,15 +295,8 @@ async function publishEvent(
     return;
   }
 
-  if (redisAvailable && redisPublisher) {
-    const message = JSON.stringify({ topic, ...payload, publishedAt: new Date().toISOString() });
-    await redisPublisher.publish(`haiflow:${topic}`, message);
-    log("info", "event_published", { topic, session: payload.session, taskId: payload.taskId });
-  } else {
-    // Direct dispatch fallback when Redis is unavailable
-    handlePipelineEvent(topic, payload);
-    log("info", "event_published_direct", { topic, session: payload.session, taskId: payload.taskId });
-  }
+  await handlePipelineEvent(topic, payload);
+  log("info", "event_published", { topic, session: payload.session, taskId: payload.taskId });
 }
 
 function sessionPaths(session: string) {
@@ -506,7 +472,7 @@ function drainQueue(session: string) {
   log("info", "queue_drained", { session, taskId: next.id, remaining: queue.length });
 }
 
-function startClaudeSession(session: string, cwd: string): { success: boolean; error?: string } {
+async function startClaudeSession(session: string, cwd: string): Promise<{ success: boolean; error?: string }> {
   if (isTmuxRunning(session)) {
     log("info", "session_reused", { session });
     writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
@@ -515,6 +481,8 @@ function startClaudeSession(session: string, cwd: string): { success: boolean; e
 
   const result = Bun.spawnSync([
     "tmux", "new-session", "-d", "-s", tmuxName(session), "-c", cwd,
+    "-e", `HAIFLOW=1`,
+    "-e", `HAIFLOW_PORT=${PORT}`,
     "claude", "--dangerously-skip-permissions",
   ]);
 
@@ -525,7 +493,19 @@ function startClaudeSession(session: string, cwd: string): { success: boolean; e
 
   setSessionId(session, null);
   writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
-  log("info", "session_started", { session, cwd });
+
+  // Wait for Claude Code to fully initialize (hooks/session-start fires when ready)
+  const maxWait = 15_000;
+  const start = Date.now();
+  while (Date.now() - start < maxWait) {
+    if (getSessionId(session)) {
+      log("info", "session_started", { session, cwd, readyMs: Date.now() - start });
+      return { success: true };
+    }
+    await Bun.sleep(500);
+  }
+
+  log("info", "session_started", { session, cwd, note: "ready timeout — session may still be initializing" });
   return { success: true };
 }
 
@@ -657,9 +637,21 @@ const server = Bun.serve({
     // --- Pipeline ---
 
     "/pipeline": {
-      GET: authed(() => {
+      GET: authed(async () => {
         const pipeline = readPipeline();
-        return Response.json({ ...pipeline, redis: redisAvailable, recentEvents: pipelineEvents.slice(-10) });
+        const events = await eventBus.getRecentEvents(10);
+        const recentEvents = [];
+        for (const e of events) {
+          const deliveries = await eventBus.getDeliveries(e.id);
+          recentEvents.push({
+            topic: e.topic,
+            sourceSession: e.sourceSession,
+            taskId: e.taskId,
+            subscribers: deliveries.filter((d) => d.status !== "skipped").map((d) => d.subscriber),
+            publishedAt: e.publishedAt,
+          });
+        }
+        return Response.json({ ...pipeline, redis: true, recentEvents });
       }),
     },
 
@@ -959,7 +951,7 @@ const server = Bun.serve({
           return Response.json({ error: "cwd is required" }, { status: 400 });
         }
 
-        const result = startClaudeSession(session, cwd);
+        const result = await startClaudeSession(session, cwd);
         if (!result.success) {
           return Response.json({ error: result.error }, { status: 409 });
         }
@@ -1009,5 +1001,68 @@ for (const dir of readdirSync(BASE_DIR).filter((d) => existsSync(`${BASE_DIR}/${
 log("info", "server_started", { port: server.port, auth: !!API_KEY });
 log("info", "sessions_recovered", { sessions: listSessions() });
 
-// Initialize Redis for pipeline pub/sub (non-blocking — falls back to direct dispatch)
-initRedis();
+// Replay unprocessed events from previous run
+const unprocessed = await eventBus.getUnprocessedEvents();
+for (const evt of unprocessed) {
+  log("info", "event_replay", { eventId: evt.id, topic: evt.topic });
+  await handlePipelineEvent(evt.topic, {
+    session: evt.sourceSession,
+    taskId: evt.taskId,
+    message: evt.message,
+    chain: evt.chain,
+  }, { skipRecording: true, existingEventId: evt.id });
+}
+if (unprocessed.length > 0) {
+  log("info", "events_replayed", { count: unprocessed.length });
+}
+
+// Retry failed webhooks every 60 seconds
+setInterval(async () => {
+  const retries = await eventBus.getPendingWebhookRetries();
+  for (const retry of retries) {
+    const pipeline = readPipeline();
+    const topicConfig = pipeline.topics[retry.topic];
+    if (!topicConfig) continue;
+
+    const webhookUrl = retry.subscriber.replace("webhook:", "");
+    const wh = topicConfig.webhooks?.find((w) => w.url === webhookUrl);
+    if (!wh || wh.enabled === false) continue;
+
+    const payload = {
+      topic: retry.topic,
+      sourceSession: retry.sourceSession,
+      taskId: retry.taskId,
+      message: retry.message,
+      publishedAt: new Date().toISOString(),
+    };
+
+    fetch(wh.url, {
+      method: wh.method ?? "POST",
+      headers: { "Content-Type": "application/json", ...wh.headers },
+      body: JSON.stringify(payload),
+    }).then(async () => {
+      await eventBus.updateDelivery(retry.eventId, retry.subscriber, { status: "delivered" });
+      await eventBus.finalizeEvent(retry.eventId);
+      log("info", "pipeline_webhook_retried", { topic: retry.topic, url: wh.url });
+    }).catch(async (err) => {
+      const attempts = retry.attempts + 1;
+      if (attempts >= 5) {
+        await eventBus.updateDelivery(retry.eventId, retry.subscriber, { status: "failed", lastError: String(err) });
+      } else {
+        const delay = 60_000 * Math.pow(2, attempts - 1);
+        await eventBus.updateDelivery(retry.eventId, retry.subscriber, {
+          status: "failed",
+          lastError: String(err),
+          nextRetryAt: new Date(Date.now() + delay).toISOString(),
+        });
+      }
+      await eventBus.finalizeEvent(retry.eventId);
+    });
+  }
+}, 60_000);
+
+// Prune events older than 7 days, every 24 hours
+setInterval(async () => {
+  const pruned = await eventBus.prune(7);
+  if (pruned > 0) log("info", "events_pruned", { count: pruned });
+}, 86_400_000);
