@@ -150,4 +150,24 @@ describe("auth", () => {
     const { status } = await api("/session/stop", "POST", {});
     expect(status).toBe(401);
   });
+
+  test("protects DELETE /responses", async () => {
+    const { status } = await api("/responses", "DELETE");
+    expect(status).toBe(401);
+  });
+
+  test("protects /pipeline", async () => {
+    const { status } = await api("/pipeline");
+    expect(status).toBe(401);
+  });
+
+  test("protects /pipeline/topics", async () => {
+    const { status } = await api("/pipeline/topics");
+    expect(status).toBe(401);
+  });
+
+  test("protects /publish", async () => {
+    const { status } = await api("/publish", "POST", { topic: "t", message: "m" });
+    expect(status).toBe(401);
+  });
 });

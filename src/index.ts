@@ -1,9 +1,20 @@
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync } from "fs";
+import { RedisClient } from "bun";
 import dashboard from "./dashboard/index.html";
+import {
+  sanitizeSession, sanitizeId, generateId, tmuxName,
+  validateStructural, buildSecurityPreamble,
+  isAllowedTranscriptPath, renderTemplate,
+} from "./utils";
 
 const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
 const API_KEY = process.env.HAIFLOW_API_KEY?.trim();
+const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
+
+// Max prompt/message size: 512KB — safely under Claude Code's ~150K usable token budget
+// and under tmux/OS transport limits. The file-based fallback in sendToTmux handles delivery.
+const MAX_PROMPT_SIZE = 512_000;
 
 if (!API_KEY) {
   console.error("HAIFLOW_API_KEY is required. Set it in your .env or environment.");
@@ -22,17 +33,39 @@ function log(level: "info" | "warn" | "error", event: string, data?: Record<stri
 
 // --- Auth ---
 
+const API_KEY_BUFFER = Buffer.from(`Bearer ${API_KEY}`);
+
 function requireAuth(req: Request): Response | null {
-  const header = req.headers.get("authorization");
-  if (header === `Bearer ${API_KEY}`) return null;
+  const header = req.headers.get("authorization") ?? "";
+  const headerBuf = Buffer.from(header);
+  // Constant-time comparison: prevent timing attacks on API key
+  const match = headerBuf.length === API_KEY_BUFFER.length &&
+    crypto.timingSafeEqual(headerBuf, API_KEY_BUFFER);
+  if (match) return null;
   log("warn", "auth_rejected", { path: new URL(req.url).pathname });
   return Response.json({ error: "Unauthorized" }, { status: 401 });
 }
 
+const LOCALHOST_IPS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+// Headers injected by reverse proxies — presence means the request was proxied,
+// not a direct local connection. Cloudflare Tunnel always adds CF-Connecting-IP.
+const PROXY_HEADERS = ["cf-connecting-ip", "x-forwarded-for"];
+
 function requireLocalhost(req: Request): Response | null {
-  const { hostname } = new URL(req.url);
-  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return null;
-  log("warn", "hook_rejected_non_local", { path: new URL(req.url).pathname, hostname });
+  // Reject requests that arrived through a reverse proxy (e.g. Cloudflare Tunnel).
+  // Even though cloudflared connects from localhost, these are external requests.
+  for (const header of PROXY_HEADERS) {
+    if (req.headers.has(header)) {
+      log("warn", "hook_rejected_proxied", { path: new URL(req.url).pathname, header });
+      return Response.json({ error: "Hooks are restricted to localhost" }, { status: 403 });
+    }
+  }
+
+  const ip = server?.requestIP(req);
+  const address = ip?.address ?? "";
+  if (LOCALHOST_IPS.has(address)) return null;
+  log("warn", "hook_rejected_non_local", { path: new URL(req.url).pathname, address });
   return Response.json({ error: "Hooks are restricted to localhost" }, { status: 403 });
 }
 
@@ -46,18 +79,16 @@ function authed(handler: (req: any) => Response | Promise<Response>) {
 
 // --- Session helpers ---
 
-function sanitizeSession(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "default";
-}
-
 type Status = "idle" | "busy" | "offline";
 
 interface State {
   status: Status;
   since: string;
   session?: string;
+  cwd?: string;
   currentPrompt?: string;
   currentTaskId?: string;
+  currentChain?: string[];
   queueLength: number;
 }
 
@@ -66,6 +97,240 @@ interface QueueItem {
   prompt: string;
   addedAt: string;
   source?: string;
+  chain?: string[];
+}
+
+// --- Pipeline types ---
+
+interface PipelineSubscriber {
+  session: string;
+  promptTemplate: string;
+  enabled?: boolean;
+}
+
+interface WebhookSubscriber {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  enabled?: boolean;
+}
+
+interface TopicConfig {
+  description?: string;
+  subscribers: PipelineSubscriber[];
+  webhooks?: WebhookSubscriber[];
+}
+
+interface PipelineConfig {
+  topics: Record<string, TopicConfig>;
+  emitters: Record<string, string[]>;
+}
+
+const EMPTY_PIPELINE: PipelineConfig = { topics: {}, emitters: {} };
+
+function readPipeline(): PipelineConfig {
+  const file = `${BASE_DIR}/pipeline.json`;
+  if (!existsSync(file)) return EMPTY_PIPELINE;
+  try {
+    const raw = readFileSync(file, "utf-8");
+    const config = JSON.parse(raw);
+    return { topics: config.topics ?? {}, emitters: config.emitters ?? {} };
+  } catch {
+    log("warn", "pipeline_config_invalid", { file });
+    return EMPTY_PIPELINE;
+  }
+}
+
+// --- Redis pub/sub ---
+
+let redisPublisher: RedisClient | null = null;
+let redisSubscriber: RedisClient | null = null;
+let redisAvailable = false;
+
+// Recent pipeline events for introspection (ring buffer)
+const pipelineEvents: Array<{
+  topic: string;
+  sourceSession: string;
+  taskId: string;
+  subscribers: string[];
+  publishedAt: string;
+}> = [];
+const MAX_EVENTS = 50;
+
+function trackEvent(event: typeof pipelineEvents[number]) {
+  pipelineEvents.push(event);
+  if (pipelineEvents.length > MAX_EVENTS) pipelineEvents.shift();
+}
+
+async function initRedis() {
+  try {
+    redisPublisher = new RedisClient(REDIS_URL);
+    await redisPublisher.connect();
+    redisSubscriber = await redisPublisher.duplicate();
+
+    const pipeline = readPipeline();
+    const topicNames = Object.keys(pipeline.topics);
+
+    for (const topic of topicNames) {
+      await redisSubscriber.subscribe(`haiflow:${topic}`, (rawMessage: string) => {
+        try {
+          const event = JSON.parse(rawMessage);
+          // Use the channel topic, not the message body — prevents spoofing
+          handlePipelineEvent(topic, event);
+        } catch {
+          log("error", "pipeline_message_parse_failed", { topic });
+        }
+      });
+    }
+
+    redisAvailable = true;
+    const safeUrl = REDIS_URL.replace(/:\/\/[^@]+@/, "://*****@");
+    log("info", "redis_connected", { url: safeUrl, topics: topicNames });
+  } catch (err) {
+    const safeUrl = REDIS_URL.replace(/:\/\/[^@]+@/, "://*****@");
+    log("warn", "redis_unavailable", { url: safeUrl, error: String(err) });
+    redisAvailable = false;
+  }
+}
+
+function handlePipelineEvent(
+  topic: string,
+  event: { session: string; taskId: string; message: string; chain?: string[] }
+) {
+  const pipeline = readPipeline();
+  const topicConfig = pipeline.topics[topic];
+  if (!topicConfig) return;
+
+  const chain = [...(event.chain ?? []), event.session];
+  const subscriberNames: string[] = [];
+
+  for (const sub of topicConfig.subscribers) {
+    if (sub.enabled === false) continue;
+
+    const subscriberSession = sanitizeSession(sub.session);
+
+    // Circular protection: skip if this session is already in the chain
+    if (chain.includes(subscriberSession)) {
+      log("warn", "pipeline_circular_skipped", { topic, subscriber: subscriberSession, chain });
+      continue;
+    }
+
+    const prompt = renderTemplate(sub.promptTemplate, {
+      message: event.message,
+      topic,
+      sourceSession: event.session,
+      taskId: event.taskId,
+    });
+
+    if (prompt.length > MAX_PROMPT_SIZE) {
+      log("warn", "pipeline_prompt_too_large", { topic, subscriber: subscriberSession, size: prompt.length });
+      continue;
+    }
+
+    // Hard structural block check on rendered prompt
+    const validation = validateStructural(prompt);
+    if (!validation.ok) {
+      log("warn", "pipeline_prompt_rejected", { topic, subscriber: subscriberSession, reason: validation.reason });
+      continue;
+    }
+
+    const taskId = generateId();
+    const state = readState(subscriberSession);
+
+    if (state.status === "offline") {
+      // Queue anyway so it's picked up when session starts
+      const queue = readQueue(subscriberSession);
+      queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain });
+      writeQueue(subscriberSession, queue);
+      log("warn", "pipeline_subscriber_offline", { topic, subscriber: subscriberSession, taskId });
+      subscriberNames.push(subscriberSession);
+      continue;
+    }
+
+    if (state.status === "busy") {
+      const queue = readQueue(subscriberSession);
+      queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain });
+      writeQueue(subscriberSession, queue);
+      log("info", "pipeline_queued", { topic, subscriber: subscriberSession, taskId });
+      subscriberNames.push(subscriberSession);
+      continue;
+    }
+
+    // Session is idle — send immediately
+    writeState(subscriberSession, {
+      status: "busy",
+      since: new Date().toISOString(),
+      currentPrompt: prompt,
+      currentTaskId: taskId,
+      currentChain: chain,
+    });
+    sendToTmux(subscriberSession, prompt);
+    log("info", "pipeline_dispatched", { topic, subscriber: subscriberSession, taskId });
+    subscriberNames.push(subscriberSession);
+  }
+
+  // Fire outbound webhooks
+  for (const wh of topicConfig.webhooks ?? []) {
+    if (wh.enabled === false) continue;
+
+    const payload = {
+      topic,
+      sourceSession: event.session,
+      taskId: event.taskId,
+      message: event.message,
+      publishedAt: new Date().toISOString(),
+    };
+
+    fetch(wh.url, {
+      method: wh.method ?? "POST",
+      headers: { "Content-Type": "application/json", ...wh.headers },
+      body: JSON.stringify(payload),
+    }).then(() => {
+      log("info", "pipeline_webhook_sent", { topic, url: wh.url });
+    }).catch((err) => {
+      log("error", "pipeline_webhook_failed", { topic, url: wh.url, error: String(err) });
+    });
+
+    subscriberNames.push(`webhook:${wh.url}`);
+  }
+
+  trackEvent({
+    topic,
+    sourceSession: event.session,
+    taskId: event.taskId,
+    subscribers: subscriberNames,
+    publishedAt: new Date().toISOString(),
+  });
+}
+
+async function publishEvent(
+  topic: string,
+  payload: { session: string; taskId: string; message: string; chain?: string[]; external?: boolean }
+) {
+  const pipeline = readPipeline();
+  const topicConfig = pipeline.topics[topic];
+  if (!topicConfig) {
+    log("warn", "publish_unknown_topic", { topic, session: payload.session });
+    return;
+  }
+
+  // Validate that this session is allowed to emit to this topic
+  // "external" is always allowed (used by POST /publish)
+  const allowedTopics = pipeline.emitters[payload.session] ?? [];
+  if (!allowedTopics.includes(topic) && !payload.external) {
+    log("warn", "publish_unauthorized", { topic, session: payload.session });
+    return;
+  }
+
+  if (redisAvailable && redisPublisher) {
+    const message = JSON.stringify({ topic, ...payload, publishedAt: new Date().toISOString() });
+    await redisPublisher.publish(`haiflow:${topic}`, message);
+    log("info", "event_published", { topic, session: payload.session, taskId: payload.taskId });
+  } else {
+    // Direct dispatch fallback when Redis is unavailable
+    handlePipelineEvent(topic, payload);
+    log("info", "event_published_direct", { topic, session: payload.session, taskId: payload.taskId });
+  }
 }
 
 function sessionPaths(session: string) {
@@ -77,18 +342,6 @@ function sessionPaths(session: string) {
     responses: `${dir}/responses`,
     sessionId: `${dir}/session-id`,
   };
-}
-
-function tmuxName(session: string) {
-  return session;
-}
-
-function generateId(): string {
-  return `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function sanitizeId(id: string): string {
-  return id.replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 128) || generateId();
 }
 
 function responseFile(session: string, id: string): string {
@@ -114,9 +367,15 @@ function readState(session: string): State {
   }
 }
 
-function writeState(session: string, state: Omit<State, "queueLength" | "session">) {
+function writeState(session: string, updates: Partial<Omit<State, "queueLength" | "session">>) {
   const p = sessionPaths(session);
-  writeFileSync(p.state, JSON.stringify(state, null, 2));
+  // Merge with existing state to preserve persistent fields like cwd
+  let existing: Record<string, unknown> = {};
+  if (existsSync(p.state)) {
+    try { existing = JSON.parse(readFileSync(p.state, "utf-8")); } catch {}
+  }
+  const merged = { ...existing, ...updates };
+  writeFileSync(p.state, JSON.stringify(merged, null, 2));
 }
 
 function readQueue(session: string): QueueItem[] {
@@ -158,22 +417,33 @@ function findSessionByClaudeId(claudeSessionId: string): string | null {
 }
 
 function sendToTmux(session: string, prompt: string): boolean {
+  // Hard structural blocks — these break out of the orchestrator itself
+  const check = validateStructural(prompt);
+  if (!check.ok) {
+    log("warn", "prompt_blocked", { session, reason: check.reason });
+    return false;
+  }
+
+  // Prepend security preamble so Claude enforces .env, cwd, and injection rules
+  const state = readState(session);
+  const preamble = buildSecurityPreamble(state.cwd);
+  const fullPrompt = preamble + prompt;
+
   const target = tmuxName(session);
 
-  // For large prompts, write to a temp file and use tmux load-buffer + paste-buffer
-  // to avoid send-keys buffer limits that cause pasted text not to submit
-  if (prompt.length > 2000) {
-    // For large prompts, write to a file and tell Claude to read it
-    const tmpFile = `/tmp/haiflow-prompt-${session}-${Date.now()}.txt`;
-    writeFileSync(tmpFile, prompt);
+  // For large prompts, write to a temp file and tell Claude to read it
+  // to avoid tmux send-keys buffer limits
+  if (fullPrompt.length > 2000) {
+    const tmpFile = `/tmp/haiflow-prompt-${crypto.randomUUID()}.txt`;
+    writeFileSync(tmpFile, fullPrompt, { mode: 0o600 });
     const shortPrompt = `Read the file ${tmpFile} and follow the instructions in it exactly.`;
-    const escaped = shortPrompt.replace(/"/g, '\\"');
-    const result = Bun.spawnSync(["tmux", "send-keys", "-t", target, escaped, "Enter"]);
+    const result = Bun.spawnSync(["tmux", "send-keys", "-t", target, shortPrompt, "Enter"]);
+    // Clean up temp file after a delay (give Claude time to read it)
+    setTimeout(() => { try { unlinkSync(tmpFile); } catch {} }, 60_000);
     return result.exitCode === 0;
   }
 
-  const escaped = prompt.replace(/"/g, '\\"');
-  const result = Bun.spawnSync(["tmux", "send-keys", "-t", target, escaped, "Enter"]);
+  const result = Bun.spawnSync(["tmux", "send-keys", "-t", target, fullPrompt, "Enter"]);
   return result.exitCode === 0;
 }
 
@@ -186,7 +456,7 @@ function saveResponse(session: string, taskId: string, transcriptPath?: string, 
   if (!taskId) return;
   const file = responseFile(session, taskId);
 
-  if (transcriptPath && existsSync(transcriptPath)) {
+  if (transcriptPath && isAllowedTranscriptPath(transcriptPath) && existsSync(transcriptPath)) {
     try {
       const lastUserLine = JSON.parse(
         Bun.spawnSync(["jq", "-s", 'to_entries | map(select(.value.type == "user")) | last | .key', transcriptPath]).stdout.toString()
@@ -229,6 +499,7 @@ function drainQueue(session: string) {
     since: new Date().toISOString(),
     currentPrompt: next.prompt,
     currentTaskId: next.id,
+    currentChain: next.chain,
   });
 
   sendToTmux(session, next.prompt);
@@ -238,7 +509,7 @@ function drainQueue(session: string) {
 function startClaudeSession(session: string, cwd: string): { success: boolean; error?: string } {
   if (isTmuxRunning(session)) {
     log("info", "session_reused", { session });
-    writeState(session, { status: "idle", since: new Date().toISOString() });
+    writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
     return { success: true };
   }
 
@@ -253,7 +524,7 @@ function startClaudeSession(session: string, cwd: string): { success: boolean; e
   }
 
   setSessionId(session, null);
-  writeState(session, { status: "idle", since: new Date().toISOString() });
+  writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
   log("info", "session_started", { session, cwd });
   return { success: true };
 }
@@ -321,6 +592,16 @@ const server = Bun.serve({
           return Response.json({ error: "prompt is required" }, { status: 400 });
         }
 
+        if (prompt.length > MAX_PROMPT_SIZE) {
+          return Response.json({ error: `prompt exceeds ${MAX_PROMPT_SIZE} character limit (512KB)` }, { status: 413 });
+        }
+
+        const validation = validateStructural(prompt);
+        if (!validation.ok) {
+          log("warn", "trigger_rejected", { session, taskId: id, reason: validation.reason });
+          return Response.json({ error: `Prompt rejected: ${validation.reason}` }, { status: 400 });
+        }
+
         const state = readState(session);
 
         if (state.status === "offline") {
@@ -370,6 +651,54 @@ const server = Bun.serve({
         writeQueue(session, []);
         log("info", "queue_cleared", { session });
         return Response.json({ session, cleared: true });
+      }),
+    },
+
+    // --- Pipeline ---
+
+    "/pipeline": {
+      GET: authed(() => {
+        const pipeline = readPipeline();
+        return Response.json({ ...pipeline, redis: redisAvailable, recentEvents: pipelineEvents.slice(-10) });
+      }),
+    },
+
+    "/pipeline/topics": {
+      GET: authed(() => {
+        const pipeline = readPipeline();
+        return Response.json(Object.keys(pipeline.topics));
+      }),
+    },
+
+    "/publish": {
+      POST: authed(async (req) => {
+        const body = await req.json();
+        const topic = body.topic as string;
+        const message = body.message as string;
+        const session = body.session as string | undefined;
+
+        if (!topic || !message) {
+          return Response.json({ error: "topic and message are required" }, { status: 400 });
+        }
+
+        if (message.length > MAX_PROMPT_SIZE) {
+          return Response.json({ error: `message exceeds ${MAX_PROMPT_SIZE} character limit (512KB)` }, { status: 413 });
+        }
+
+        const validation = validateStructural(message);
+        if (!validation.ok) {
+          log("warn", "publish_rejected", { topic, reason: validation.reason });
+          return Response.json({ error: `Message rejected: ${validation.reason}` }, { status: 400 });
+        }
+
+        await publishEvent(topic, {
+          session: session ?? "external",
+          taskId: generateId(),
+          message,
+          external: true,
+        });
+
+        return Response.json({ published: true, topic });
       }),
     },
 
@@ -578,6 +907,19 @@ const server = Bun.serve({
         const state = readState(session);
         if (state.currentTaskId) {
           saveResponse(session, state.currentTaskId, body.transcript_path, body.last_assistant_message);
+
+          // Pipeline: emit to subscribed topics, propagating chain for circular detection
+          const pipeline = readPipeline();
+          const emitterTopics = pipeline.emitters[session] ?? [];
+          const responseText = body.last_assistant_message ?? "";
+          for (const topic of emitterTopics) {
+            await publishEvent(topic, {
+              session,
+              taskId: state.currentTaskId,
+              message: responseText,
+              chain: state.currentChain,
+            });
+          }
         }
 
         writeState(session, { status: "idle", since: new Date().toISOString() });
@@ -666,3 +1008,6 @@ for (const dir of readdirSync(BASE_DIR).filter((d) => existsSync(`${BASE_DIR}/${
 
 log("info", "server_started", { port: server.port, auth: !!API_KEY });
 log("info", "sessions_recovered", { sessions: listSessions() });
+
+// Initialize Redis for pipeline pub/sub (non-blocking — falls back to direct dispatch)
+initRedis();

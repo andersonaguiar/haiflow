@@ -137,6 +137,68 @@ View queued prompts for a session.
 
 Clear all queued prompts.
 
+## Pipeline
+
+The pipeline system enables event-driven agent chains. When an agent finishes a task, it can emit an event to a topic. Other agents subscribed to that topic automatically receive the output as their next prompt.
+
+Configuration is via `pipeline.json` in your `HAIFLOW_DATA_DIR`. See `examples/pipeline.json` for a full example. Topics support two subscriber types: **agent sessions** (receive a rendered prompt) and **outbound webhooks** (receive a JSON POST with the event payload).
+
+### `GET /pipeline`
+
+Get the current pipeline configuration, Redis status, and recent events.
+
+```bash
+curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  http://localhost:3333/pipeline | jq .
+```
+
+```json
+{
+  "topics": { "design.ready": { "subscribers": [...] } },
+  "emitters": { "design-agent": ["design.ready"] },
+  "redis": true,
+  "recentEvents": [
+    {
+      "topic": "design.ready",
+      "sourceSession": "design-agent",
+      "taskId": "task_1234_abc",
+      "subscribers": ["developer"],
+      "publishedAt": "2025-04-06T10:00:00Z"
+    }
+  ]
+}
+```
+
+### `GET /pipeline/topics`
+
+List all configured topic names.
+
+```bash
+curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  http://localhost:3333/pipeline/topics | jq .
+```
+
+```json
+["design.ready", "code.ready", "review.done"]
+```
+
+### `POST /publish`
+
+Publish an event to a pipeline topic. Useful for external systems (n8n, scripts) to inject work into the pipeline.
+
+```bash
+curl -X POST http://localhost:3333/publish \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "design.ready", "message": "New design for the login page: ..."}'
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `topic` | string | **Yes** | Topic name to publish to |
+| `message` | string | **Yes** | Message content (passed to subscriber prompt templates as `{{message}}`) |
+| `session` | string | No | Source session name (default: `"external"`) |
+
 ## `GET /health`
 
 Returns `ok`.

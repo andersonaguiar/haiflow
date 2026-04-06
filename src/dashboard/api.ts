@@ -94,3 +94,21 @@ export async function stopSession(session: string) {
   });
   return { status: res.status, data: await res.json() };
 }
+
+export async function getPipeline() {
+  const res = await apiFetch("/pipeline");
+  return res.json();
+}
+
+export async function getPipelineTopics() {
+  const res = await apiFetch("/pipeline/topics");
+  return res.json();
+}
+
+export async function publishEvent(topic: string, message: string, session?: string) {
+  const res = await apiFetch("/publish", {
+    method: "POST",
+    body: JSON.stringify({ topic, message, session }),
+  });
+  return res.json();
+}

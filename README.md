@@ -37,12 +37,25 @@ GET /responses/:id <──────────────┤
 GET /responses/:id/stream <───────┘  (SSE)
 ```
 
+### Agent pipeline
+
+Chain agents together with event-driven pub/sub. Each agent subscribes to topics it cares about and emits events when done — no hardcoded dependencies between agents.
+
+```
+Design Agent ──emit──▶ design.ready ──subscribe──▶ Developer Agent
+Developer    ──emit──▶ code.ready   ──subscribe──▶ Code Reviewer
+Reviewer     ──emit──▶ review.done  ──subscribe──▶ QA Agent
+```
+
+See [Pipeline](#pipeline) for setup.
+
 ## Prerequisites
 
 - [Bun](https://bun.sh) v1.2.3+
 - [tmux](https://github.com/tmux/tmux)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - [jq](https://jqlang.github.io/jq/)
+- [Redis](https://redis.io/) (optional — needed for decoupled pipeline pub/sub)
 
 ## Quick start
 
@@ -125,6 +138,7 @@ cp .env.example .env
 | `HAIFLOW_DATA_DIR` | `/tmp/haiflow` | Directory for session state, queues, and responses |
 | `HAIFLOW_PORT` | `3333` | Port used by hook scripts (set if different from PORT) |
 | `HAIFLOW_API_KEY` | — | **Required.** Any string you choose — this is your own secret, not a paid key |
+| `REDIS_URL` | `redis://localhost:6379` | Redis URL for pipeline pub/sub (optional — falls back to direct dispatch) |
 | `N8N_API_KEY` | — | n8n API key for workflow integration |
 
 ## Authentication
@@ -177,7 +191,7 @@ Haiflow outputs structured JSON logs to stdout/stderr for all key events:
 {"ts":"2025-03-18T02:35:10Z","level":"warn","event":"auth_rejected","path":"/trigger"}
 ```
 
-Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_failed`, `queue_drained`, `queue_cleared`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `auth_rejected`.
+Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_failed`, `queue_drained`, `queue_cleared`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `auth_rejected`, `redis_connected`, `redis_unavailable`, `event_published`, `event_published_direct`, `pipeline_dispatched`, `pipeline_queued`, `pipeline_subscriber_offline`, `pipeline_circular_skipped`, `pipeline_prompt_too_large`, `pipeline_webhook_sent`, `pipeline_webhook_failed`, `publish_unknown_topic`, `publish_unauthorized`.
 
 ## How it works
 
@@ -202,6 +216,8 @@ Import the workflow templates from `examples/n8n-workflows/`:
 - `trigger-prompt.json` — Webhook that forwards prompts to haiflow
 - `scheduled-trigger-with-polling.json` — Scheduled daily trigger with SSE streaming
 - `pr-review-bot.json` — Automated PR review bot using `/code-review`
+- `agent-pipeline.json` — Trigger the first agent in a pipeline chain
+- `pipeline-notify-on-review.json` — Poll pipeline events and notify Slack when a code review completes
 
 ### Cron job
 
@@ -220,6 +236,159 @@ alias ct='curl -s -X POST http://localhost:3333/trigger \
   -H "Content-Type: application/json" -d'
 ct '{"prompt": "explain the error in the logs", "id": "debug-1"}'
 ```
+
+## Pipeline
+
+The pipeline system lets you chain agents together using pub/sub topics. When an agent finishes a task, haiflow automatically emits its output to configured topics. Other agents subscribed to those topics receive the output as their next prompt.
+
+### How it works
+
+1. Agent finishes a task → `/hooks/stop` fires
+2. Haiflow checks if the session has emitter topics in `pipeline.json`
+3. Output is published to those topics (via Redis pub/sub, or direct dispatch if Redis is unavailable)
+4. Subscriber agents receive the message, rendered through their prompt template
+5. If a subscriber is busy, the message queues up and drains automatically
+
+### Setup
+
+1. **Create `pipeline.json`** in your `HAIFLOW_DATA_DIR` (default `/tmp/haiflow`):
+
+```json
+{
+  "topics": {
+    "design.ready": {
+      "description": "Design agent completed its analysis",
+      "subscribers": [
+        {
+          "session": "developer",
+          "promptTemplate": "Implement this design:\n\n{{message}}"
+        }
+      ]
+    },
+    "code.ready": {
+      "subscribers": [
+        {
+          "session": "code-reviewer",
+          "promptTemplate": "Review these changes:\n\n{{message}}"
+        }
+      ]
+    }
+  },
+  "emitters": {
+    "design-agent": ["design.ready"],
+    "developer": ["code.ready"]
+  }
+}
+```
+
+2. **(Optional) Start Redis** for decoupled pub/sub. Without Redis, pipeline events are dispatched directly — still works, just without the decoupling benefits.
+
+```bash
+# Add to .env
+REDIS_URL=redis://localhost:6379
+```
+
+3. **Start your agents** and trigger the first one. The pipeline handles the rest.
+
+```bash
+# Start all agents in the chain
+curl -X POST http://localhost:3333/session/start \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "design-agent", "cwd": "/path/to/project"}'
+
+curl -X POST http://localhost:3333/session/start \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "developer", "cwd": "/path/to/project"}'
+
+# Trigger the first agent — the pipeline chains the rest
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Analyse the Figma design at ...", "session": "design-agent"}'
+```
+
+### Prompt templates
+
+Templates use `{{variable}}` placeholders:
+
+| Variable | Description |
+|----------|-------------|
+| `{{message}}` | The source agent's output text |
+| `{{topic}}` | The topic name (e.g. `design.ready`) |
+| `{{sourceSession}}` | The session that emitted the event |
+| `{{taskId}}` | The source task ID |
+
+### Outbound webhooks
+
+Topics can fire webhooks when events are published — no polling needed. Add a `webhooks` array to any topic in `pipeline.json`:
+
+```json
+{
+  "topics": {
+    "review.done": {
+      "subscribers": [...],
+      "webhooks": [
+        {
+          "url": "https://your-n8n.example.com/webhook/review-done",
+          "headers": { "X-Pipeline-Secret": "your-secret" }
+        }
+      ]
+    }
+  }
+}
+```
+
+Haiflow POSTs the event payload to each URL:
+
+```json
+{
+  "topic": "review.done",
+  "sourceSession": "code-reviewer",
+  "taskId": "task_1234_abc",
+  "message": "Review complete. No issues found...",
+  "publishedAt": "2025-04-06T10:00:00Z"
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `url` | — | Webhook endpoint URL |
+| `method` | `POST` | HTTP method |
+| `headers` | `{}` | Custom headers (merged with `Content-Type: application/json`) |
+| `enabled` | `true` | Set to `false` to disable |
+
+### External publishing
+
+Inject events from outside (n8n, scripts, webhooks):
+
+```bash
+curl -X POST http://localhost:3333/publish \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "design.ready", "message": "New login page design: ..."}'
+```
+
+### Introspection
+
+```bash
+# View pipeline config, Redis status, and recent events
+curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  http://localhost:3333/pipeline | jq .
+
+# List topic names
+curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  http://localhost:3333/pipeline/topics | jq .
+```
+
+### Safety
+
+- **Circular protection**: If agent A emits to a topic that eventually routes back to A, the cycle is detected and skipped
+- **Emitter allowlist**: Only sessions listed in `emitters` can publish to a topic (except `POST /publish` which uses `"external"`)
+- **Graceful degradation**: No Redis? Pipeline still works via direct dispatch
+
+See `examples/pipeline.json` for a full design→developer→reviewer→QA example.
 
 ## Project structure
 
@@ -246,6 +415,7 @@ haiflow/
 │   └── session-end.sh        # SessionEnd hook
 ├── examples/
 │   ├── n8n-workflows/        # Importable n8n workflow JSON files
+│   ├── pipeline.json         # Example pipeline config (design→dev→review→QA)
 │   └── curl-examples.sh      # Quick start curl scripts
 ├── assets/
 │   └── demo.gif              # Demo recording
