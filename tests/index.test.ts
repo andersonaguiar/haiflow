@@ -4,7 +4,6 @@ import {
   sanitizeId,
   tmuxName,
   validateStructural,
-  buildSecurityPreamble,
   isAllowedTranscriptPath,
   renderTemplate,
 } from "../src/utils";
@@ -102,28 +101,6 @@ describe("security", () => {
     });
   });
 
-  describe("buildSecurityPreamble", () => {
-    test("includes cwd when provided", () => {
-      const preamble = buildSecurityPreamble("/home/user/project");
-      expect(preamble).toContain("Working directory: /home/user/project");
-      expect(preamble).toContain("SECURITY CONSTRAINTS");
-      expect(preamble).toContain(".env");
-    });
-
-    test("omits cwd line when not provided", () => {
-      const preamble = buildSecurityPreamble();
-      expect(preamble).not.toContain("Working directory:");
-      expect(preamble).toContain("SECURITY CONSTRAINTS");
-    });
-
-    test("includes all key security rules", () => {
-      const preamble = buildSecurityPreamble("/tmp");
-      expect(preamble).toContain(".env");
-      expect(preamble).toContain("private keys");
-      expect(preamble).toContain("external URLs");
-      expect(preamble).toContain("tmux");
-    });
-  });
 
   describe("isAllowedTranscriptPath", () => {
     test("allows paths inside ~/.claude/", () => {

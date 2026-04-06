@@ -64,7 +64,8 @@
           "timeout": 310000,
           "response": {
             "response": {
-              "responseFormat": "text"
+              "responseFormat": "text",
+              "neverError": true
             }
           }
         }

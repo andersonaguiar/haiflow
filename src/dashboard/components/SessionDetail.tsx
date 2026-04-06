@@ -22,6 +22,8 @@ interface ResponseItem {
   completed_at: string;
 }
 
+type Tab = "queue" | "responses";
+
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   if (ms < 0) return "just now";
@@ -42,16 +44,16 @@ const statusBadge: Record<string, string> = {
 
 function ExpandableResponse({ session, id, completedAt }: { session: string; id: string; completedAt: string }) {
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<string[] | null>(null);
+  const [data, setData] = useState<{ prompt?: string; messages?: string[] } | null>(null);
 
   const load = async () => {
-    if (messages) { setOpen(!open); return; }
+    if (data) { setOpen(!open); return; }
     setOpen(true);
     try {
-      const { data } = await getResponse(session, id);
-      setMessages(data.messages || []);
+      const res = await getResponse(session, id);
+      setData({ prompt: res.data.prompt, messages: res.data.messages || [] });
     } catch {
-      setMessages(["Failed to load response"]);
+      setData({ messages: ["Failed to load response"] });
     }
   };
 
@@ -62,16 +64,70 @@ function ExpandableResponse({ session, id, completedAt }: { session: string; id:
         <span className="text-xs text-gray-600 shrink-0">{timeAgo(completedAt)}</span>
         <span className="text-xs text-gray-600 shrink-0">{open ? "−" : "+"}</span>
       </button>
-      {open && messages && (
-        <div className="px-3 pb-3">
-          {messages.map((msg, i) => (
-            <pre key={i} className="text-xs text-gray-300 bg-gray-800 rounded p-2 mt-1 whitespace-pre-wrap break-words overflow-x-auto">
-              {msg}
-            </pre>
-          ))}
+      {open && data && (
+        <div className="px-3 pb-3 space-y-2">
+          {data.prompt && (
+            <div>
+              <span className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Prompt</span>
+              <pre className="text-xs text-blue-300 bg-blue-950/30 border border-blue-900/30 rounded p-2 mt-0.5 whitespace-pre-wrap break-words overflow-x-auto">
+                {data.prompt}
+              </pre>
+            </div>
+          )}
+          <div>
+            <span className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Response</span>
+            {data.messages?.map((msg, i) => (
+              <pre key={i} className="text-xs text-gray-300 bg-gray-800 rounded p-2 mt-0.5 whitespace-pre-wrap break-words overflow-x-auto">
+                {msg}
+              </pre>
+            ))}
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+function ExpandableQueueItem({ item }: { item: QueueItem }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="border-b border-gray-800 last:border-b-0">
+      <button onClick={() => setOpen(!open)} className="w-full text-left px-3 py-2 flex items-center gap-3 hover:bg-gray-800/50 transition-colors text-sm">
+        <span className="text-gray-400 font-mono text-xs truncate flex-1">{item.id}</span>
+        <span className="text-gray-300 truncate max-w-48" title={item.prompt}>{item.prompt}</span>
+        <span className="text-xs text-gray-600 shrink-0">{timeAgo(item.addedAt)}</span>
+        <span className="text-xs text-gray-600 shrink-0">{open ? "−" : "+"}</span>
+      </button>
+      {open && (
+        <div className="px-3 pb-3">
+          {item.source && (
+            <p className="text-[10px] uppercase tracking-wider text-gray-600 font-medium mb-1">
+              Source: <span className="text-gray-400 normal-case">{item.source}</span>
+            </p>
+          )}
+          <span className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Prompt</span>
+          <pre className="text-xs text-blue-300 bg-blue-950/30 border border-blue-900/30 rounded p-2 mt-0.5 whitespace-pre-wrap break-words overflow-x-auto">
+            {item.prompt}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TabButton({ active, label, count, onClick }: { active: boolean; label: string; count?: number; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`text-xs font-medium px-3 py-1.5 rounded-t border-b-2 transition-colors ${
+        active
+          ? "text-gray-200 border-blue-500"
+          : "text-gray-500 border-transparent hover:text-gray-400"
+      }`}
+    >
+      {label}{count !== undefined ? ` (${count})` : ""}
+    </button>
   );
 }
 
@@ -80,6 +136,7 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [responses, setResponses] = useState<ResponseItem[]>([]);
   const [stopping, setStopping] = useState(false);
+  const [tab, setTab] = useState<Tab>("queue");
 
   const fetchAll = useCallback(async () => {
     try {
@@ -132,14 +189,6 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
             </span>
           </div>
           <p className="text-xs text-gray-500">Since {timeAgo(status.since)}</p>
-          {status.currentPrompt && (
-            <p className="text-sm text-gray-400 mt-1 truncate max-w-lg" title={status.currentPrompt}>
-              {status.currentPrompt}
-            </p>
-          )}
-          {status.currentTaskId && (
-            <p className="text-xs text-gray-600 font-mono mt-0.5">{status.currentTaskId}</p>
-          )}
         </div>
         {status.status !== "offline" && (
           <button
@@ -152,57 +201,64 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
         )}
       </div>
 
-      {/* Queue */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider">
-            Queue ({queue.length})
-          </h3>
-          {queue.length > 0 && (
-            <button onClick={handleClearQueue} className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
-              Clear All
-            </button>
+      {/* Current prompt */}
+      {status.status === "busy" && status.currentPrompt && (
+        <div>
+          <span className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Current prompt</span>
+          <pre className="text-sm text-blue-300 bg-blue-950/30 border border-blue-900/30 rounded p-3 mt-1 whitespace-pre-wrap break-words overflow-x-auto">
+            {status.currentPrompt}
+          </pre>
+          {status.currentTaskId && (
+            <p className="text-xs text-gray-600 font-mono mt-1">{status.currentTaskId}</p>
           )}
         </div>
-        {queue.length === 0 ? (
-          <p className="text-xs text-gray-600">Empty</p>
-        ) : (
-          <div className="bg-gray-900 rounded border border-gray-800">
-            {queue.map((item) => (
-              <div key={item.id} className="px-3 py-2 border-b border-gray-800 last:border-b-0 flex items-center gap-3 text-sm">
-                <span className="text-gray-400 font-mono text-xs truncate flex-1">{item.id}</span>
-                <span className="text-gray-300 truncate max-w-48" title={item.prompt}>{item.prompt}</span>
-                <span className="text-xs text-gray-600 shrink-0">{timeAgo(item.addedAt)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      )}
 
-      {/* Responses */}
+      {/* Tabs */}
       <div>
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider">
-            Responses ({responses.length})
-          </h3>
-          {responses.length > 0 && (
-            <button onClick={async () => { await clearResponses(session); fetchAll(); }} className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
-              Clear All
+        <div className="flex items-center gap-1 border-b border-gray-800">
+          <TabButton active={tab === "queue"} label="Queue" count={queue.length} onClick={() => setTab("queue")} />
+          <TabButton active={tab === "responses"} label="Responses" count={responses.length} onClick={() => setTab("responses")} />
+          {tab === "queue" && queue.length > 0 && (
+            <button onClick={handleClearQueue} className="ml-auto text-xs text-red-400/70 hover:text-red-300 border border-red-400/20 hover:border-red-400/40 rounded px-2 py-0.5 transition-colors">
+              Clear Queue
+            </button>
+          )}
+          {tab === "responses" && responses.length > 0 && (
+            <button onClick={async () => { await clearResponses(session); fetchAll(); }} className="ml-auto text-xs text-red-400/70 hover:text-red-300 border border-red-400/20 hover:border-red-400/40 rounded px-2 py-0.5 transition-colors">
+              Clear Responses
             </button>
           )}
         </div>
-        {responses.length === 0 ? (
-          <p className="text-xs text-gray-600">None yet</p>
-        ) : (
-          <div className="bg-gray-900 rounded border border-gray-800">
-            {[...responses]
-              .sort((a, b) => new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime())
-              .slice(0, 20)
-              .map((r) => (
-              <ExpandableResponse key={r.id} session={session} id={r.id} completedAt={r.completed_at} />
-            ))}
-          </div>
-        )}
+
+        <div className="mt-2">
+          {tab === "queue" && (
+            queue.length === 0 ? (
+              <p className="text-xs text-gray-600">Empty</p>
+            ) : (
+              <div className="bg-gray-900 rounded border border-gray-800">
+                {queue.map((item) => (
+                  <ExpandableQueueItem key={item.id} item={item} />
+                ))}
+              </div>
+            )
+          )}
+
+          {tab === "responses" && (
+            responses.length === 0 ? (
+              <p className="text-xs text-gray-600">None yet</p>
+            ) : (
+              <div className="bg-gray-900 rounded border border-gray-800">
+                {[...responses]
+                  .sort((a, b) => new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime())
+                  .slice(0, 20)
+                  .map((r) => (
+                  <ExpandableResponse key={r.id} session={session} id={r.id} completedAt={r.completed_at} />
+                ))}
+              </div>
+            )
+          )}
+        </div>
       </div>
 
       {/* Trigger */}

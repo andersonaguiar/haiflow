@@ -2,7 +2,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlink
 import dashboard from "./dashboard/index.html";
 import {
   sanitizeSession, sanitizeId, generateId, tmuxName,
-  validateStructural, buildSecurityPreamble,
+  validateStructural,
   isAllowedTranscriptPath, renderTemplate,
 } from "./utils";
 import { EventBus } from "./events";
@@ -420,10 +420,7 @@ function sendToTmux(session: string, prompt: string): boolean {
     return false;
   }
 
-  // Prepend security preamble so Claude enforces .env, cwd, and injection rules
-  const state = readState(session);
-  const preamble = buildSecurityPreamble(state.cwd);
-  const fullPrompt = preamble + prompt;
+  const fullPrompt = prompt;
 
   const target = tmuxName(session);
 
@@ -448,7 +445,7 @@ function isTmuxRunning(session: string): boolean {
   return result.exitCode === 0;
 }
 
-function saveResponse(session: string, taskId: string, transcriptPath?: string, lastMessage?: string) {
+function saveResponse(session: string, taskId: string, prompt?: string, transcriptPath?: string, lastMessage?: string) {
   if (!taskId) return;
   const file = responseFile(session, taskId);
 
@@ -464,7 +461,7 @@ function saveResponse(session: string, taskId: string, transcriptPath?: string, 
       );
       if (Array.isArray(messages) && messages.length > 0) {
         writeFileSync(file, JSON.stringify({
-          id: taskId, completed_at: new Date().toISOString(), messages,
+          id: taskId, completed_at: new Date().toISOString(), prompt, messages,
         }, null, 2));
         log("info", "response_saved", { session, taskId, source: "transcript" });
         return;
@@ -474,7 +471,7 @@ function saveResponse(session: string, taskId: string, transcriptPath?: string, 
 
   if (lastMessage) {
     writeFileSync(file, JSON.stringify({
-      id: taskId, completed_at: new Date().toISOString(), messages: [lastMessage],
+      id: taskId, completed_at: new Date().toISOString(), prompt, messages: [lastMessage],
     }, null, 2));
     log("info", "response_saved", { session, taskId, source: "fallback" });
   }
@@ -928,7 +925,7 @@ const server = Bun.serve({
 
         const state = readState(session);
         if (state.currentTaskId) {
-          saveResponse(session, state.currentTaskId, body.transcript_path, body.last_assistant_message);
+          saveResponse(session, state.currentTaskId, state.currentPrompt, body.transcript_path, body.last_assistant_message);
 
           // Pipeline: emit to subscribed topics, propagating chain for circular detection
           const pipeline = readPipeline();
