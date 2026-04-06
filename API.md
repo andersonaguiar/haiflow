@@ -27,6 +27,16 @@ curl -X POST http://localhost:3333/session/stop \
   -d '{"session": "worker"}'
 ```
 
+## `POST /session/remove`
+
+Remove an offline session's data (state, queue, responses). Only works on offline sessions.
+
+```bash
+curl -X POST http://localhost:3333/session/remove \
+  -H "Content-Type: application/json" \
+  -d '{"session": "worker"}'
+```
+
 ## `POST /trigger`
 
 Send a prompt to Claude. If Claude is busy, the prompt is auto-queued and sent when idle.

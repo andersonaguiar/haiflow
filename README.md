@@ -177,8 +177,8 @@ http://localhost:3333/dashboard
 
 Enter your `HAIFLOW_API_KEY` to authenticate, then you get a two-panel layout:
 
-- **Left panel** — all sessions with live status badges (idle/busy/offline)
-- **Right panel** — selected session's current prompt, queue, and response history
+- **Left panel** — all sessions with live status badges (idle/busy/offline), remove offline sessions with ×
+- **Right panel** — current prompt (when busy), tabbed Queue/Responses view with expandable items showing full prompt and response text
 - **Actions** — start/stop sessions, send prompts, clear queue/responses
 
 The dashboard auto-refreshes every 3 seconds. No extra setup needed — it's served by the same Bun server.
@@ -188,11 +188,11 @@ The dashboard auto-refreshes every 3 seconds. No extra setup needed — it's ser
 Haiflow outputs structured JSON logs to stdout/stderr for all key events:
 
 ```jsonl
-{"ts":"2025-03-18T02:35:00Z","level":"info","event":"server_started","port":3333,"auth":true}
-{"ts":"2025-03-18T02:35:01Z","level":"info","event":"session_started","session":"worker","cwd":"/app"}
-{"ts":"2025-03-18T02:35:02Z","level":"info","event":"trigger_sent","session":"worker","taskId":"task-001"}
-{"ts":"2025-03-18T02:35:09Z","level":"info","event":"response_saved","session":"worker","taskId":"task-001","source":"transcript"}
-{"ts":"2025-03-18T02:35:10Z","level":"warn","event":"auth_rejected","path":"/trigger"}
+{"ts":"2026-03-18T02:35:00Z","level":"info","event":"server_started","port":3333,"auth":true}
+{"ts":"2026-03-18T02:35:01Z","level":"info","event":"session_started","session":"worker","cwd":"/app"}
+{"ts":"2026-03-18T02:35:02Z","level":"info","event":"trigger_sent","session":"worker","taskId":"task-001"}
+{"ts":"2026-03-18T02:35:09Z","level":"info","event":"response_saved","session":"worker","taskId":"task-001","source":"transcript"}
+{"ts":"2026-03-18T02:35:10Z","level":"warn","event":"auth_rejected","path":"/trigger"}
 ```
 
 Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_failed`, `queue_drained`, `queue_cleared`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `auth_rejected`, `redis_connected`, `redis_unavailable`, `event_published`, `event_published_direct`, `pipeline_dispatched`, `pipeline_queued`, `pipeline_subscriber_offline`, `pipeline_circular_skipped`, `pipeline_prompt_too_large`, `pipeline_webhook_sent`, `pipeline_webhook_failed`, `publish_unknown_topic`, `publish_unauthorized`.
@@ -217,9 +217,9 @@ Haiflow works with any tool that can make HTTP requests. Here are a few examples
 ### n8n (example workflow templates included)
 
 Import the chained calc workflow from `examples/chained-calc/`:
-- `chained-calc-step1.json` — Step 1: receive a number and double it
-- `chained-calc-step2.json` — Step 2: receive doubled result and add 10
-- `chained-calc-step3.json` — Step 3: receive final result and format output
+- `chained-calc-step1.json` — Step 1: calculate 2+2
+- `chained-calc-step2.json` — Step 2: multiply result by 5
+- `chained-calc-step3.json` — Step 3: multiply result by 10
 - `pipeline-calc-chain.json` — Pipeline configuration that wires them together
 
 ### Cron job
@@ -284,14 +284,7 @@ The pipeline system lets you chain agents together using pub/sub topics. When an
 }
 ```
 
-2. **(Optional) Start Redis** for decoupled pub/sub. Without Redis, pipeline events are dispatched directly — still works, just without the decoupling benefits.
-
-```bash
-# Add to .env
-REDIS_URL=redis://localhost:6379
-```
-
-3. **Start your agents** and trigger the first one. The pipeline handles the rest.
+2. **Start your agents** and trigger the first one. The pipeline handles the rest.
 
 ```bash
 # Start all agents in the chain
@@ -351,7 +344,7 @@ Haiflow POSTs the event payload to each URL:
   "sourceSession": "code-reviewer",
   "taskId": "task_1234_abc",
   "message": "Review complete. No issues found...",
-  "publishedAt": "2025-04-06T10:00:00Z"
+  "publishedAt": "2026-04-06T10:00:00Z"
 }
 ```
 
