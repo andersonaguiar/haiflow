@@ -1,0 +1,141 @@
+{
+  "name": "Haiflow Chain - Step 1: Calculate 2+2",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3333/session/start",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ cwd: '/tmp', session: 'calc-step1' }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env.HAIFLOW_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "start-1",
+      "name": "Start Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3333/trigger",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ prompt: 'Calculate 2+2. Reply with ONLY the numeric result, nothing else.', session: 'calc-step1', id: 'calc1-' + Date.now(), source: 'n8n' }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env.HAIFLOW_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "trigger-1",
+      "name": "Trigger Haiflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:3333/responses/{{ $json.id }}/stream?session=calc-step1&timeout=300",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env.HAIFLOW_API_KEY }}" }
+          ]
+        },
+        "options": {
+          "timeout": 310000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "stream-1",
+      "name": "Stream Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $input.first().json.data || '';\nfor (const block of text.split('\\n\\n').reverse()) {\n  if (block.includes('event: complete')) {\n    const line = block.split('\\n').find(l => l.startsWith('data: '));\n    if (line) return [{ json: JSON.parse(line.slice(6)) }];\n  }\n}\nreturn [{ json: { error: 'Task did not complete', raw: text } }];"
+      },
+      "id": "parse-1",
+      "name": "Parse SSE Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3333/session/stop",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ session: 'calc-step1' }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env.HAIFLOW_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "stop-1",
+      "name": "Stop Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const messages = $('Parse SSE Response').first().json.messages || [];\nconst result = messages.join('\\n').trim();\nreturn [{ json: { step: 1, prompt: 'Calculate 2+2', result, messages } }];"
+      },
+      "id": "log-1",
+      "name": "Log Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300],
+      "notes": "Pipeline event calc.step1.done is raised automatically by haiflow when the agent finishes (before we stop the session)."
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "Start Session", "type": "main", "index": 0 }]]
+    },
+    "Start Session": {
+      "main": [[{ "node": "Trigger Haiflow", "type": "main", "index": 0 }]]
+    },
+    "Trigger Haiflow": {
+      "main": [[{ "node": "Stream Response", "type": "main", "index": 0 }]]
+    },
+    "Stream Response": {
+      "main": [[{ "node": "Parse SSE Response", "type": "main", "index": 0 }]]
+    },
+    "Parse SSE Response": {
+      "main": [[{ "node": "Stop Session", "type": "main", "index": 0 }]]
+    },
+    "Stop Session": {
+      "main": [[{ "node": "Log Result", "type": "main", "index": 0 }]]
+    }
+  }
+}

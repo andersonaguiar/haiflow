@@ -1,0 +1,26 @@
+{
+  "topics": {
+    "calc.step1.done": {
+      "description": "Step 1 finished: calculated 2+2 = 4",
+      "webhooks": [
+        {
+          "url": "http://localhost:5678/webhook/calc-step1-done",
+          "method": "POST"
+        }
+      ]
+    },
+    "calc.step2.done": {
+      "description": "Step 2 finished: multiplied result by 5 = 20",
+      "webhooks": [
+        {
+          "url": "http://localhost:5678/webhook/calc-step2-done",
+          "method": "POST"
+        }
+      ]
+    }
+  },
+  "emitters": {
+    "calc-step1": ["calc.step1.done"],
+    "calc-step2": ["calc.step2.done"]
+  }
+}

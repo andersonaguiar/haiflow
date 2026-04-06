@@ -1,0 +1,36 @@
+{
+  "name": "Haiflow Pipeline - Notify on Review Complete",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "review-done",
+        "responseMode": "lastNode"
+      },
+      "id": "webhook-1",
+      "name": "Review Done Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "notes": "Receives { topic, sourceSession, taskId, message, publishedAt } from haiflow pipeline webhooks. Add this URL to pipeline.json under review.done webhooks."
+    },
+    {
+      "parameters": {
+        "channel": "#dev-reviews",
+        "text": "=:white_check_mark: *Code review complete* (from `{{ $json.body.sourceSession }}`)\n\n{{ $json.body.message.substring(0, 1500) }}",
+        "otherOptions": {}
+      },
+      "id": "slack-1",
+      "name": "Notify Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [480, 300],
+      "notes": "Replace with your notification channel — Slack, Discord, email, etc."
+    }
+  ],
+  "connections": {
+    "Review Done Webhook": {
+      "main": [[{ "node": "Notify Slack", "type": "main", "index": 0 }]]
+    }
+  }
+}

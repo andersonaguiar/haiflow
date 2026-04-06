@@ -1,0 +1,160 @@
+{
+  "name": "Haiflow Chain - Step 3: Multiply by 10",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "calc-step2-done",
+        "responseMode": "onReceived"
+      },
+      "id": "webhook-1",
+      "name": "Pipeline Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "webhookId": "be29531e-4367-4b8b-89e7-c06a5b0dda09",
+      "position": [240, 300],
+      "notes": "Receives { topic, sourceSession, taskId, message, publishedAt } from haiflow pipeline when calc.step2.done fires."
+    },
+    {
+      "parameters": {
+        "jsCode": "const message = $input.first().json.body.message || '';\nconst numbers = message.match(/\\d+/g);\nconst previousResult = numbers ? numbers[numbers.length - 1] : message.trim();\nreturn [{ json: { previousResult, prompt: `Take the number ${previousResult} and multiply it by 10. Reply with ONLY the numeric result, nothing else.` } }];"
+      },
+      "id": "extract-1",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3333/session/start",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ cwd: '/tmp', session: 'calc-step3' }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env.HAIFLOW_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "start-1",
+      "name": "Start Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3333/trigger",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ prompt: $('Build Prompt').first().json.prompt, session: 'calc-step3', id: 'calc3-' + Date.now(), source: 'n8n' }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env.HAIFLOW_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "trigger-1",
+      "name": "Trigger Haiflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:3333/responses/{{ $json.id }}/stream?session=calc-step3&timeout=300",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env.HAIFLOW_API_KEY }}" }
+          ]
+        },
+        "options": {
+          "timeout": 310000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "stream-1",
+      "name": "Stream Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $input.first().json.data || '';\nfor (const block of text.split('\\n\\n').reverse()) {\n  if (block.includes('event: complete')) {\n    const line = block.split('\\n').find(l => l.startsWith('data: '));\n    if (line) return [{ json: JSON.parse(line.slice(6)) }];\n  }\n}\nreturn [{ json: { error: 'Task did not complete', raw: text } }];"
+      },
+      "id": "parse-1",
+      "name": "Parse SSE Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3333/session/stop",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ session: 'calc-step3' }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env.HAIFLOW_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "stop-1",
+      "name": "Stop Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const messages = $('Parse SSE Response').first().json.messages || [];\nconst result = messages.join('\\n').trim();\nreturn [{ json: { step: 3, prompt: 'Multiply previous result by 10', result, messages, finalAnswer: 'Expected: 2+2=4, x5=20, x10=200' } }];"
+      },
+      "id": "log-1",
+      "name": "Log Final Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 300],
+      "notes": "End of chain. Expected result: 200 (2+2=4 → 4x5=20 → 20x10=200)."
+    }
+  ],
+  "connections": {
+    "Pipeline Webhook": {
+      "main": [[{ "node": "Build Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Prompt": {
+      "main": [[{ "node": "Start Session", "type": "main", "index": 0 }]]
+    },
+    "Start Session": {
+      "main": [[{ "node": "Trigger Haiflow", "type": "main", "index": 0 }]]
+    },
+    "Trigger Haiflow": {
+      "main": [[{ "node": "Stream Response", "type": "main", "index": 0 }]]
+    },
+    "Stream Response": {
+      "main": [[{ "node": "Parse SSE Response", "type": "main", "index": 0 }]]
+    },
+    "Parse SSE Response": {
+      "main": [[{ "node": "Stop Session", "type": "main", "index": 0 }]]
+    },
+    "Stop Session": {
+      "main": [[{ "node": "Log Final Result", "type": "main", "index": 0 }]]
+    }
+  }
+}
