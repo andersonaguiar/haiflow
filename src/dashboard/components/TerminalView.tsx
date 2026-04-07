@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { getApiKey } from "../api";
 
-export function TerminalView({ session }: { session: string }) {
+export function TerminalView({ session, className }: { session: string; className?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -68,8 +68,7 @@ export function TerminalView({ session }: { session: string }) {
   return (
     <div
       ref={containerRef}
-      className="w-full rounded border border-gray-800 overflow-hidden"
-      style={{ height: "420px" }}
+      className={className ?? "w-full rounded border border-gray-800 overflow-hidden h-[420px]"}
     />
   );
 }

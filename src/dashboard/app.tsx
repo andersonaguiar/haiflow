@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { getSessions, getApiKey, setApiKey, clearApiKey, AuthError } from "./api";
 import { SessionList } from "./components/SessionList";
 import { SessionDetail } from "./components/SessionDetail";
+import { TerminalWall } from "./components/TerminalWall";
 
 interface Session {
   session: string;
@@ -53,6 +54,15 @@ function Dashboard() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [authed, setAuthed] = useState(!!getApiKey());
+  const [view, setView] = useState<"dashboard" | "wall">(() =>
+    location.hash === "#wall" ? "wall" : "dashboard"
+  );
+
+  useEffect(() => {
+    const onHash = () => setView(location.hash === "#wall" ? "wall" : "dashboard");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -74,16 +84,28 @@ function Dashboard() {
     return <Login onLogin={() => setAuthed(true)} />;
   }
 
+  if (view === "wall") {
+    return <TerminalWall onBack={() => { location.hash = ""; setView("dashboard"); }} />;
+  }
+
   return (
     <div className="min-h-screen flex flex-col">
       <header className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
         <h1 className="text-lg font-semibold tracking-tight">haiflow</h1>
-        <button
-          onClick={() => { clearApiKey(); setAuthed(false); }}
-          className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-        >
-          Logout
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => { location.hash = "#wall"; setView("wall"); }}
+            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            Terminal Wall
+          </button>
+          <button
+            onClick={() => { clearApiKey(); setAuthed(false); }}
+            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            Logout
+          </button>
+        </div>
       </header>
       <div className="flex flex-1 flex-col md:flex-row overflow-hidden">
         <SessionList
