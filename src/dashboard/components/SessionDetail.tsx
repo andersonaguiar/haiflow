@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { getStatus, getQueue, getResponses, getResponse, clearQueue, clearResponses, stopSession, AuthError } from "../api";
 import { TriggerForm } from "./TriggerForm";
+import { TerminalView } from "./TerminalView";
 
 interface Status {
   status: "idle" | "busy" | "offline";
@@ -22,7 +23,7 @@ interface ResponseItem {
   completed_at: string;
 }
 
-type Tab = "queue" | "responses";
+type Tab = "terminal" | "queue" | "responses";
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -136,7 +137,7 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [responses, setResponses] = useState<ResponseItem[]>([]);
   const [stopping, setStopping] = useState(false);
-  const [tab, setTab] = useState<Tab>("queue");
+  const [tab, setTab] = useState<Tab>("terminal");
 
   const fetchAll = useCallback(async () => {
     try {
@@ -217,6 +218,9 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
       {/* Tabs */}
       <div>
         <div className="flex items-center gap-1 border-b border-gray-800">
+          {status.status !== "offline" && (
+            <TabButton active={tab === "terminal"} label="Terminal" onClick={() => setTab("terminal")} />
+          )}
           <TabButton active={tab === "queue"} label="Queue" count={queue.length} onClick={() => setTab("queue")} />
           <TabButton active={tab === "responses"} label="Responses" count={responses.length} onClick={() => setTab("responses")} />
           {tab === "queue" && queue.length > 0 && (
@@ -232,6 +236,10 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
         </div>
 
         <div className="mt-2">
+          {tab === "terminal" && status.status !== "offline" && (
+            <TerminalView session={session} />
+          )}
+
           {tab === "queue" && (
             queue.length === 0 ? (
               <p className="text-xs text-gray-600">Empty</p>

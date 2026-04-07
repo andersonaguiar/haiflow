@@ -1025,6 +1025,76 @@ const server = Bun.serve({
 
     "/health": new Response("ok"),
     "/dashboard": dashboard,
+
+    // WebSocket upgrade for live terminal view
+    "/terminal": {
+      GET: (req: Request) => {
+        const url = new URL(req.url);
+        const session = sanitizeSession(url.searchParams.get("session") ?? "default");
+        const key = url.searchParams.get("key") ?? "";
+
+        // Auth via query param (WebSocket can't set custom headers from browser)
+        const keyBuf = Buffer.from(`Bearer ${key}`);
+        const match = keyBuf.length === API_KEY_BUFFER.length &&
+          crypto.timingSafeEqual(keyBuf, API_KEY_BUFFER);
+        if (!match) {
+          return Response.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        if (!isTmuxRunning(session)) {
+          return Response.json({ error: "Session not running" }, { status: 404 });
+        }
+
+        const upgraded = server.upgrade(req, { data: { session } });
+        if (!upgraded) {
+          return Response.json({ error: "WebSocket upgrade failed" }, { status: 500 });
+        }
+      },
+    },
+  },
+
+  websocket: {
+    open(ws: any) {
+      const session = ws.data.session as string;
+      const target = tmuxName(session);
+
+      // Use `script` as PTY wrapper so tmux gets a real terminal
+      const cmd = process.platform === "darwin"
+        ? ["script", "-q", "/dev/null", "tmux", "attach-session", "-t", target, "-r"]
+        : ["script", "-qc", `tmux attach-session -t ${target} -r`, "/dev/null"];
+
+      const proc = Bun.spawn(cmd, {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TERM: "xterm-256color" },
+      });
+
+      ws.data.proc = proc;
+
+      // Stream tmux output to the WebSocket
+      (async () => {
+        try {
+          for await (const chunk of proc.stdout) {
+            ws.send(chunk);
+          }
+        } catch {
+          // WebSocket closed
+        }
+        try { ws.close(); } catch {}
+      })();
+
+      log("info", "terminal_ws_opened", { session });
+    },
+
+    message(_ws: any, _msg: any) {
+      // Read-only: ignore all input from the browser
+    },
+
+    close(ws: any) {
+      const session = ws.data.session as string;
+      try { ws.data.proc?.kill(); } catch {}
+      log("info", "terminal_ws_closed", { session });
+    },
   },
 
   development: {
