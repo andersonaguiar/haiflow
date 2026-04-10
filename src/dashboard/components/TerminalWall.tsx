@@ -1,11 +1,9 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import { getSessions, AuthError } from "../api";
 import { TerminalView } from "./TerminalView";
-
-interface Session {
-  session: string;
-  status: "idle" | "busy" | "offline";
-}
+import { StatusDot, EmptyState, TerminalIcon } from "./ui";
+import { usePolling } from "../hooks";
+import type { Session } from "../types";
 
 export function TerminalWall({ onBack }: { onBack: () => void }) {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -19,15 +17,10 @@ export function TerminalWall({ onBack }: { onBack: () => void }) {
     }
   }, [onBack]);
 
-  useEffect(() => {
-    fetchSessions();
-    const id = setInterval(fetchSessions, 10_000);
-    return () => clearInterval(id);
-  }, [fetchSessions]);
+  usePolling(fetchSessions, 10_000);
 
   const count = sessions.length;
 
-  // Pick grid columns based on session count
   const gridCols =
     count <= 1 ? "grid-cols-1" :
     count <= 2 ? "grid-cols-2" :
@@ -51,15 +44,19 @@ export function TerminalWall({ onBack }: { onBack: () => void }) {
       </header>
 
       {count === 0 ? (
-        <div className="flex-1 flex items-center justify-center text-gray-600 text-sm">
-          No active sessions
+        <div className="flex-1 flex items-center justify-center">
+          <EmptyState
+            icon={<TerminalIcon size={24} />}
+            title="No active sessions"
+            description="Start a session from the dashboard to see terminals here"
+          />
         </div>
       ) : (
         <div className={`flex-1 grid ${gridCols} gap-px bg-gray-800 overflow-hidden`}>
           {sessions.map((s) => (
             <div key={s.session} className="flex flex-col bg-gray-950 overflow-hidden">
               <div className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-800 shrink-0">
-                <span className={`w-1.5 h-1.5 rounded-full ${s.status === "busy" ? "bg-amber-400" : "bg-green-400"}`} />
+                <StatusDot status={s.status} />
                 <span className="text-xs font-medium text-gray-300 truncate">{s.session}</span>
                 <span className="text-[10px] text-gray-600">{s.status}</span>
               </div>
