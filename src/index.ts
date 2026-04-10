@@ -689,6 +689,20 @@ const server = Bun.serve({
       }),
     },
 
+    "/events": {
+      GET: authed(async (req) => {
+        const url = new URL(req.url);
+        const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), 200);
+        const events = await eventBus.getRecentEvents(limit);
+        const result = [];
+        for (const e of events) {
+          const deliveries = await eventBus.getDeliveries(e.id);
+          result.push({ ...e, deliveries });
+        }
+        return Response.json({ events: result });
+      }),
+    },
+
     "/publish": {
       POST: authed(async (req) => {
         const body = await req.json();

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { startSession } from "../api";
+import { useToast } from "./ui";
 
 export function StartSession({
   onDone,
@@ -12,6 +13,7 @@ export function StartSession({
   const [cwd, setCwd] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const toast = useToast();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,6 +25,7 @@ export function StartSession({
       if (status >= 400) {
         setError(data.error || "Failed to start");
       } else {
+        toast("Session started", "success");
         onDone();
       }
     } catch {
@@ -39,14 +42,14 @@ export function StartSession({
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder="Session name (default)"
-        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-500"
+        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-500 transition-colors"
       />
       <input
         type="text"
         value={cwd}
         onChange={(e) => { setCwd(e.target.value); setError(""); }}
         placeholder="Working directory (required)"
-        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-500"
+        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-500 transition-colors"
         autoFocus
       />
       {error && <p className="text-red-400 text-xs">{error}</p>}

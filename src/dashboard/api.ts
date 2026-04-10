@@ -108,6 +108,11 @@ export async function getPipeline() {
   return res.json();
 }
 
+export async function getEvents(limit = 50) {
+  const res = await apiFetch(`/events?limit=${limit}`);
+  return res.json();
+}
+
 export async function getPipelineTopics() {
   const res = await apiFetch("/pipeline/topics");
   return res.json();

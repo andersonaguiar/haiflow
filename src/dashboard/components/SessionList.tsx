@@ -1,18 +1,10 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { removeSession } from "../api";
 import { StartSession } from "./StartSession";
+import { StatusDot, EmptyState, SearchIcon, Badge, InboxIcon } from "./ui";
+import type { Session, SessionStatus } from "../types";
 
-interface Session {
-  session: string;
-  status: "idle" | "busy" | "offline";
-  tmux: string;
-}
-
-const statusColor: Record<string, string> = {
-  idle: "bg-green-500",
-  busy: "bg-amber-500",
-  offline: "bg-gray-600",
-};
+const statusOrder: SessionStatus[] = ["busy", "idle", "offline"];
 
 export function SessionList({
   sessions,
@@ -26,30 +18,95 @@ export function SessionList({
   onRefresh: () => void;
 }) {
   const [showStart, setShowStart] = useState(false);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<SessionStatus | null>(null);
+
+  const counts = useMemo(() => {
+    const c = { idle: 0, busy: 0, offline: 0 };
+    for (const s of sessions) c[s.status]++;
+    return c;
+  }, [sessions]);
+
+  const filtered = useMemo(() => {
+    let list = sessions;
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter((s) => s.session.toLowerCase().includes(q));
+    }
+    if (statusFilter) {
+      list = list.filter((s) => s.status === statusFilter);
+    }
+    return list.sort((a, b) => statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status));
+  }, [sessions, search, statusFilter]);
 
   return (
-    <aside className="w-full md:w-60 border-b md:border-b-0 md:border-r border-gray-800 flex flex-col shrink-0">
-      <div className="px-3 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider">
-        Sessions
+    <aside className="w-full md:w-64 border-b md:border-b-0 md:border-r border-gray-800 flex flex-col shrink-0">
+      {/* Header */}
+      <div className="px-3 py-2.5 border-b border-gray-800">
+        <div className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
+          Sessions
+          <span className="ml-1.5 text-gray-600 normal-case">({sessions.length})</span>
+        </div>
+
+        {/* Search */}
+        <div className="relative mb-2">
+          <div className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-600">
+            <SearchIcon size={12} />
+          </div>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter sessions..."
+            className="w-full bg-gray-800/50 border border-gray-700/50 rounded pl-6 pr-2 py-1 text-xs focus:outline-none focus:border-gray-600 placeholder:text-gray-600 transition-colors"
+          />
+        </div>
+
+        {/* Status filter */}
+        <div className="flex gap-1.5">
+          {statusOrder.map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(statusFilter === s ? null : s)}
+              className={`text-[10px] px-1.5 py-0.5 rounded-full border transition-all ${
+                statusFilter === s
+                  ? s === "busy" ? "border-amber-500/50 bg-amber-500/20 text-amber-400"
+                  : s === "idle" ? "border-green-500/50 bg-green-500/20 text-green-400"
+                  : "border-gray-500/50 bg-gray-500/20 text-gray-400"
+                  : "border-gray-700/50 text-gray-600 hover:text-gray-400"
+              }`}
+            >
+              {counts[s]} {s}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {/* Session list */}
       <div className="flex-1 overflow-y-auto">
-        {sessions.length === 0 && (
-          <p className="px-3 py-4 text-gray-600 text-sm">No sessions</p>
+        {filtered.length === 0 && (
+          <EmptyState
+            icon={<InboxIcon size={20} />}
+            title={search || statusFilter ? "No matching sessions" : "No sessions"}
+            description={search || statusFilter ? "Try adjusting your filter" : "Start a new session below"}
+          />
         )}
-        {sessions.map((s) => (
+        {filtered.map((s) => (
           <div
             key={s.session}
-            className={`flex items-center gap-2 px-3 py-2 hover:bg-gray-900 transition-colors ${
-              s.session === selected ? "bg-gray-900" : ""
+            className={`flex items-center gap-2 px-3 py-2 hover:bg-gray-900/80 transition-all cursor-pointer border-l-2 ${
+              s.session === selected
+                ? "bg-gray-900/80 border-blue-500"
+                : "border-transparent"
             }`}
           >
             <button
               onClick={() => onSelect(s.session === selected ? null : s.session)}
               className="flex items-center gap-2 text-sm text-left flex-1 min-w-0"
             >
-              <span className={`w-2 h-2 rounded-full shrink-0 ${statusColor[s.status]}`} />
-              <span className="truncate flex-1">{s.session}</span>
-              <span className="text-xs text-gray-500">{s.status}</span>
+              <StatusDot status={s.status} />
+              <span className="truncate flex-1 text-gray-300">{s.session}</span>
+              <span className="text-[10px] text-gray-600">{s.status}</span>
             </button>
             {s.status === "offline" && (
               <button
@@ -68,6 +125,8 @@ export function SessionList({
           </div>
         ))}
       </div>
+
+      {/* Start session */}
       <div className="p-2 border-t border-gray-800">
         {showStart ? (
           <StartSession
