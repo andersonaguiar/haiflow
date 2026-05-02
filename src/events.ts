@@ -36,20 +36,45 @@ export interface WebhookRetry extends DeliveryRecord {
 
 const EVENT_TTL = 7 * 86_400; // 7 days in seconds
 const MAX_EVENTS = 1000;
+const CONNECT_TIMEOUT_MS = 3000;
 
 // --- EventBus ---
 
 export class EventBus {
   private redis: RedisClient;
+  // false when Redis is unreachable. Methods short-circuit to safe defaults
+  // so the rest of the server (HTTP API, sessions, queues) keeps working.
+  // Pipeline events become fire-and-forget — no persistence, no retry.
+  public readonly connected: boolean;
 
-  private constructor(redisUrl: string) {
+  private constructor(redisUrl: string, connected: boolean) {
     this.redis = new RedisClient(redisUrl);
+    this.connected = connected;
   }
 
   static async create(redisUrl: string): Promise<EventBus> {
-    const bus = new EventBus(redisUrl);
-    await bus.redis.connect();
-    return bus;
+    const probe = new RedisClient(redisUrl);
+    try {
+      await Promise.race([
+        probe.connect(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("redis connect timeout")), CONNECT_TIMEOUT_MS)
+        ),
+      ]);
+      probe.close();
+      return new EventBus(redisUrl, true);
+    } catch (err) {
+      probe.close();
+      console.error(JSON.stringify({
+        ts: new Date().toISOString(),
+        level: "warn",
+        event: "redis_unavailable",
+        url: redisUrl,
+        error: err instanceof Error ? err.message : String(err),
+        note: "Pipeline events fall back to direct dispatch — no persistence or retry.",
+      }));
+      return new EventBus(redisUrl, false);
+    }
   }
 
   /** Record a new event. Returns the event ID. */
@@ -61,6 +86,8 @@ export class EventBus {
     chain?: string[];
   }): Promise<string> {
     const id = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    if (!this.connected) return id;
+
     const record: EventRecord = {
       id,
       topic: opts.topic,
@@ -88,6 +115,7 @@ export class EventBus {
     type: DeliveryType,
     status: DeliveryStatus
   ): Promise<void> {
+    if (!this.connected) return;
     const now = new Date().toISOString();
     const record: DeliveryRecord = {
       eventId,
@@ -119,6 +147,7 @@ export class EventBus {
       nextRetryAt?: string;
     }
   ): Promise<void> {
+    if (!this.connected) return;
     const fields = await this.redis.hmget(`haiflow:deliveries:${eventId}`, [subscriber]);
     const raw = fields?.[0];
     if (!raw) return;
@@ -151,6 +180,7 @@ export class EventBus {
 
   /** Compute overall event status from its deliveries. */
   async finalizeEvent(eventId: string): Promise<void> {
+    if (!this.connected) return;
     const deliveries = await this.getDeliveries(eventId);
     let status: EventStatus;
 
@@ -188,6 +218,7 @@ export class EventBus {
 
   /** Get recent events, newest first. */
   async getRecentEvents(limit = 50): Promise<EventRecord[]> {
+    if (!this.connected) return [];
     const ids = (await this.redis.send("LRANGE", ["haiflow:events", "0", String(limit - 1)])) as string[];
     if (!ids || ids.length === 0) return [];
 
@@ -201,6 +232,7 @@ export class EventBus {
 
   /** Get all deliveries for an event. */
   async getDeliveries(eventId: string): Promise<DeliveryRecord[]> {
+    if (!this.connected) return [];
     const raw = await this.redis.send("HGETALL", [`haiflow:deliveries:${eventId}`]);
     if (!raw) return [];
 
@@ -220,6 +252,7 @@ export class EventBus {
 
   /** Get failed webhook deliveries that are due for retry. */
   async getPendingWebhookRetries(): Promise<WebhookRetry[]> {
+    if (!this.connected) return [];
     const now = String(Date.now());
     const members = (await this.redis.send("ZRANGEBYSCORE", [
       "haiflow:retries", "0", now,
@@ -251,6 +284,7 @@ export class EventBus {
 
   /** Get events with status 'published' (unprocessed, for startup replay). */
   async getUnprocessedEvents(): Promise<EventRecord[]> {
+    if (!this.connected) return [];
     const ids = (await this.redis.send("SMEMBERS", ["haiflow:events:unprocessed"])) as string[];
     if (!ids || ids.length === 0) return [];
 
@@ -269,6 +303,7 @@ export class EventBus {
 
   /** Delete events older than N days. Returns count deleted. */
   async prune(olderThanDays = 7): Promise<number> {
+    if (!this.connected) return 0;
     const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
     const allIds = (await this.redis.send("LRANGE", ["haiflow:events", "0", "-1"])) as string[];
     if (!allIds || allIds.length === 0) return 0;
@@ -304,6 +339,7 @@ export class EventBus {
 
   /** Flush all haiflow keys (for testing). */
   async flush(): Promise<void> {
+    if (!this.connected) return;
     const keys = (await this.redis.send("KEYS", ["haiflow:*"])) as string[];
     if (keys && keys.length > 0) {
       for (const key of keys) {
@@ -314,6 +350,7 @@ export class EventBus {
 
   /** Close the Redis connection. */
   close() {
+    if (!this.connected) return;
     this.redis.close();
   }
 }

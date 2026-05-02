@@ -27,14 +27,19 @@ cleanup_dump() {
 }
 trap cleanup EXIT
 
-echo "==> Step 1: start redis"
-redis-server --daemonize yes --bind 127.0.0.1 --port 6379 > /dev/null
-for _ in $(seq 1 25); do
-  redis-cli ping > /dev/null 2>&1 && break
-  sleep 0.2
-done
-redis-cli ping > /dev/null 2>&1 || fail "redis didn't come up"
-pass "redis ready"
+if [ "${SKIP_REDIS:-0}" = "1" ]; then
+  echo "==> Step 1: skipping redis (testing fallback)"
+  pass "redis fallback path will be exercised"
+else
+  echo "==> Step 1: start redis"
+  redis-server --daemonize yes --bind 127.0.0.1 --port 6379 > /dev/null
+  for _ in $(seq 1 25); do
+    redis-cli ping > /dev/null 2>&1 && break
+    sleep 0.2
+  done
+  redis-cli ping > /dev/null 2>&1 || fail "redis didn't come up"
+  pass "redis ready"
+fi
 
 echo "==> Step 2: start haiflow serve in background"
 mkdir -p "$DATA_DIR"

@@ -1,0 +1,35 @@
+name: install-test
+
+on:
+  pull_request:
+    paths:
+      - "install.sh"
+      - "bin/**"
+      - "src/**"
+      - "hooks/**"
+      - "package.json"
+      - "tests/install/**"
+      - ".github/workflows/install-test.yml"
+  push:
+    branches: [main]
+
+concurrency:
+  group: install-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-e2e:
+    name: Docker install + HTTP E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build install-test image
+        run: docker build -f tests/install/Dockerfile -t haiflow-install-test .
+
+      - name: Run E2E with Redis available
+        run: docker run --rm haiflow-install-test
+
+      - name: Run E2E with Redis unavailable (fallback path)
+        run: docker run --rm -e SKIP_REDIS=1 haiflow-install-test

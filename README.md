@@ -59,7 +59,7 @@ macOS and Linux only. Windows is not supported yet (haiflow depends on tmux and 
 - [tmux](https://github.com/tmux/tmux)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - [jq](https://jqlang.github.io/jq/)
-- [Redis](https://redis.io/) (event persistence and delivery tracking — `docker run -d -p 6379:6379 redis`)
+- [Redis](https://redis.io/) — *optional*, enables event persistence and delivery retry. Without it, pipeline events fire but aren't persisted. Run with `docker run -d -p 6379:6379 redis`.
 
 ## Quick start
 
