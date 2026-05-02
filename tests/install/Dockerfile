@@ -38,22 +38,12 @@ RUN HAIFLOW_INSTALL_METHOD=local \
 RUN haiflow 2>&1 | grep -q "haiflow - HTTP orchestrator" \
     && echo "PASS: haiflow CLI runs and prints usage"
 
-# Boot redis in the background, then verify `haiflow serve` starts Bun.serve.
-# The server's EventBus connects to Redis at startup with no fallback, so a
-# running redis is required for the server to log "server_started".
-RUN bash -c '\
-      set -o pipefail; \
-      redis-server --daemonize yes --bind 127.0.0.1 --port 6379 > /dev/null; \
-      for i in $(seq 1 20); do redis-cli ping > /dev/null 2>&1 && break; sleep 0.2; done; \
-      export HAIFLOW_API_KEY=test-key HAIFLOW_DATA_DIR=/tmp/haiflow-data; \
-      timeout 8s haiflow serve > /tmp/serve.log 2>&1 || true; \
-      if grep -q "server_started" /tmp/serve.log; then \
-        echo "PASS: haiflow serve booted Bun.serve"; \
-      else \
-        echo "FAIL: haiflow serve did not log server_started — full log below:"; \
-        cat /tmp/serve.log; \
-        exit 1; \
-      fi \
-    '
+# Bake the end-to-end test script into the image.
+COPY tests/install/e2e.sh /usr/local/bin/haiflow-e2e
+RUN chmod +x /usr/local/bin/haiflow-e2e
 
-CMD ["bash", "-lc", "haiflow && echo OK"]
+# Build-time smoke test: run the E2E script during build so a broken install
+# fails the build immediately. Re-runnable at runtime with `docker run --rm <image>`.
+RUN haiflow-e2e
+
+CMD ["haiflow-e2e"]
