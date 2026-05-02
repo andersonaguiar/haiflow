@@ -430,14 +430,23 @@ function sendToTmux(session: string, prompt: string): boolean {
     const tmpFile = `/tmp/haiflow-prompt-${crypto.randomUUID()}.txt`;
     writeFileSync(tmpFile, fullPrompt, { mode: 0o600 });
     const shortPrompt = `Read the file ${tmpFile} and follow the instructions in it exactly.`;
-    const result = Bun.spawnSync(["tmux", "send-keys", "-t", target, shortPrompt, "Enter"]);
+    const ok = typeThenSubmit(target, shortPrompt);
     // Clean up temp file after a delay (give Claude time to read it)
     setTimeout(() => { try { unlinkSync(tmpFile); } catch {} }, 60_000);
-    return result.exitCode === 0;
+    return ok;
   }
 
-  const result = Bun.spawnSync(["tmux", "send-keys", "-t", target, fullPrompt, "Enter"]);
-  return result.exitCode === 0;
+  return typeThenSubmit(target, fullPrompt);
+}
+
+// tmux treats `send-keys "<text>" Enter` as one paste block — Enter becomes
+// a newline inside the input instead of a submit. Splitting into two calls
+// makes Enter arrive as a keystroke after the paste is committed.
+function typeThenSubmit(target: string, text: string): boolean {
+  const typed = Bun.spawnSync(["tmux", "send-keys", "-t", target, "-l", text]);
+  if (typed.exitCode !== 0) return false;
+  const submitted = Bun.spawnSync(["tmux", "send-keys", "-t", target, "Enter"]);
+  return submitted.exitCode === 0;
 }
 
 function isTmuxRunning(session: string): boolean {
@@ -521,19 +530,29 @@ async function startClaudeSession(session: string, cwd: string): Promise<{ succe
   setSessionId(session, null);
   writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
 
-  // Wait for Claude Code to fully initialize (hooks/session-start fires when ready)
+  // Block until Claude's TUI is actually interactive. The session-start hook
+  // fires early in boot before the input box is mounted — hook-only checks
+  // aren't enough, so we also require the prompt line to appear in the pane.
+  const target = tmuxName(session);
   const maxWait = 15_000;
   const start = Date.now();
   while (Date.now() - start < maxWait) {
-    if (getSessionId(session)) {
+    if (getSessionId(session) && isTuiInteractive(target)) {
       log("info", "session_started", { session, cwd, readyMs: Date.now() - start });
       return { success: true };
     }
-    await Bun.sleep(500);
+    await Bun.sleep(100);
   }
 
   log("info", "session_started", { session, cwd, note: "ready timeout — session may still be initializing" });
   return { success: true };
+}
+
+function isTuiInteractive(target: string): boolean {
+  const pane = Bun.spawnSync(["tmux", "capture-pane", "-t", target, "-p"]);
+  if (pane.exitCode !== 0) return false;
+  // Claude's input box renders a `❯ ` prompt marker once the TUI is mounted.
+  return pane.stdout.toString().includes("❯");
 }
 
 function stopClaudeSession(session: string): { success: boolean; error?: string } {
