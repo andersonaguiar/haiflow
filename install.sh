@@ -3,7 +3,8 @@
 set -euo pipefail
 
 GITHUB_REPO="${HAIFLOW_GITHUB_REPO:-andersonaguiar/haiflow}"
-INSTALL_METHOD="${HAIFLOW_INSTALL_METHOD:-github}"  # github | npm
+INSTALL_METHOD="${HAIFLOW_INSTALL_METHOD:-github}"  # github | npm | local
+INSTALL_PATH="${HAIFLOW_INSTALL_PATH:-}"            # used when INSTALL_METHOD=local
 SKIP_SETUP="${HAIFLOW_SKIP_SETUP:-0}"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -68,10 +69,24 @@ if ! command -v redis-cli >/dev/null 2>&1; then
 fi
 
 info "Installing haiflow via $INSTALL_METHOD..."
+# Bun blocks postinstall scripts from untrusted packages by default. We run
+# `haiflow setup` ourselves below instead of relying on postinstall, so this
+# block isn't a problem.
 case "$INSTALL_METHOD" in
-  github) HAIFLOW_SKIP_SETUP="$SKIP_SETUP" bun install -g "github:${GITHUB_REPO}" ;;
-  npm)    HAIFLOW_SKIP_SETUP="$SKIP_SETUP" bun install -g haiflow ;;
-  *) error "Unknown install method: $INSTALL_METHOD (use 'github' or 'npm')"; exit 1 ;;
+  github) bun install -g "github:${GITHUB_REPO}" ;;
+  npm)    bun install -g haiflow ;;
+  local)
+    if [ -z "$INSTALL_PATH" ]; then
+      error "HAIFLOW_INSTALL_METHOD=local requires HAIFLOW_INSTALL_PATH=/path/to/haiflow"
+      exit 1
+    fi
+    if [ ! -d "$INSTALL_PATH" ]; then
+      error "HAIFLOW_INSTALL_PATH does not exist: $INSTALL_PATH"
+      exit 1
+    fi
+    bun install -g "$INSTALL_PATH"
+    ;;
+  *) error "Unknown install method: $INSTALL_METHOD (use 'github', 'npm', or 'local')"; exit 1 ;;
 esac
 
 if ! command -v haiflow >/dev/null 2>&1; then
@@ -84,6 +99,17 @@ if ! command -v haiflow >/dev/null 2>&1; then
 fi
 
 success "haiflow installed at $(command -v haiflow)"
+
+# Run hook setup explicitly — bun blocks postinstall on globally-installed
+# packages it considers untrusted, so postinstall.sh wouldn't fire on its own.
+if [ "$SKIP_SETUP" = "1" ]; then
+  info "Skipping hook setup (HAIFLOW_SKIP_SETUP=1)."
+elif command -v claude >/dev/null 2>&1; then
+  haiflow setup || warn "Hook setup failed — run 'haiflow setup' manually."
+else
+  warn "Skipping hook setup because 'claude' is not installed."
+  warn "Run 'haiflow setup' after installing Claude Code."
+fi
 
 echo ""
 echo "${BOLD}Next steps${RESET}"
