@@ -5,7 +5,9 @@ import { resolve, dirname } from "path";
 
 const PORT = process.env.PORT ?? "3333";
 const BASE = `http://localhost:${PORT}`;
-const HOOKS_DIR = resolve(dirname(import.meta.dir), "hooks");
+const PACKAGE_ROOT = dirname(import.meta.dir);
+const HOOKS_DIR = resolve(PACKAGE_ROOT, "hooks");
+const SERVER_ENTRY = resolve(PACKAGE_ROOT, "src/index.ts");
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -37,6 +39,15 @@ async function api(path: string, method = "GET", body?: object) {
     }
     throw e;
   }
+}
+
+async function serve() {
+  if (!existsSync(SERVER_ENTRY)) {
+    console.error(`Server entry not found at ${SERVER_ENTRY}`);
+    console.error(`The haiflow package may be incomplete — try reinstalling.`);
+    process.exit(1);
+  }
+  await import(SERVER_ENTRY);
 }
 
 async function setup() {
@@ -178,6 +189,7 @@ function usage() {
 Usage: haiflow <command> [options]
 
 Commands:
+  serve                          Run the haiflow server (this process)
   setup                          Install Claude Code hooks
   start <session> --cwd <path>   Start a Claude session
   stop [session]                 Stop a Claude session
@@ -205,6 +217,9 @@ Examples:
 }
 
 switch (command) {
+  case "serve":
+    await serve();
+    break;
   case "setup":
     await setup();
     break;

@@ -63,6 +63,24 @@ macOS and Linux only. Windows is not supported yet (haiflow depends on tmux and 
 
 ## Quick start
 
+### One-liner (macOS / Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/andersonaguiar/haiflow/main/install.sh | bash
+```
+
+Installs Bun if missing, checks for `tmux`/`jq`/`claude`/`redis`, installs the `haiflow` CLI globally, and wires up Claude Code hooks.
+
+```bash
+export HAIFLOW_API_KEY=your-secret
+haiflow serve                                      # run the server
+haiflow start worker --cwd /path/to/your/project   # in another shell
+```
+
+Skip hook setup with `HAIFLOW_SKIP_SETUP=1`. Force npm registry with `HAIFLOW_INSTALL_METHOD=npm`. Inspect the script before piping if you prefer: `curl -fsSL .../install.sh | less`.
+
+### From source
+
 ```bash
 git clone https://github.com/andersonaguiar/haiflow.git
 cd haiflow

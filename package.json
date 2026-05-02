@@ -10,11 +10,28 @@
   "scripts": {
     "dev": "bun --hot src/index.ts",
     "start": "bun run src/index.ts",
-    "postinstall": "bun run bin/haiflow.ts setup",
+    "postinstall": "bash bin/postinstall.sh",
     "setup": "bun run bin/haiflow.ts setup",
     "deps": "bash bin/check-deps.sh",
     "doctor": "bash bin/doctor.sh",
     "test": "bun test"
+  },
+  "files": [
+    "bin",
+    "src",
+    "hooks",
+    "README.md",
+    "API.md",
+    "LICENSE",
+    "CLAUDE.md",
+    ".env.example"
+  ],
+  "engines": {
+    "bun": ">=1.2.3"
+  },
+  "homepage": "https://github.com/andersonaguiar/haiflow#readme",
+  "bugs": {
+    "url": "https://github.com/andersonaguiar/haiflow/issues"
   },
   "repository": {
     "type": "git",
