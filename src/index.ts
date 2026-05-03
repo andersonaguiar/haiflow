@@ -11,6 +11,10 @@ const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
 const API_KEY = process.env.HAIFLOW_API_KEY?.trim();
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
+const FORCED_CWD = process.env.HAIFLOW_CWD?.trim() || null;
+const ALLOW_REQUEST_CWD = (process.env.HAIFLOW_ALLOW_REQUEST_CWD ?? "true").toLowerCase() !== "false";
+const ENABLE_GUARDRAILS = (process.env.HAIFLOW_GUARDRAILS ?? "true").toLowerCase() !== "false";
+const GUARDRAIL_SKILL_NAME = "haiflow-guardrails";
 
 // Max prompt/message size: 512KB — safely under Claude Code's ~150K usable token budget
 // and under tmux/OS transport limits. The file-based fallback in sendToTmux handles delivery.
@@ -508,6 +512,57 @@ function drainQueue(session: string) {
   log("info", "queue_drained", { session, taskId: next.id, remaining: queue.length });
 }
 
+function installGuardrailSkill(): void {
+  if (!ENABLE_GUARDRAILS) return;
+  const home = process.env.HOME;
+  if (!home) {
+    log("warn", "guardrail_install_skipped", { reason: "HOME not set" });
+    return;
+  }
+  const sourcePath = `${import.meta.dir}/skills/${GUARDRAIL_SKILL_NAME}.md`;
+  let content: string;
+  try {
+    content = readFileSync(sourcePath, "utf8");
+  } catch (err) {
+    log("warn", "guardrail_template_missing", { path: sourcePath, error: String(err) });
+    return;
+  }
+  const targetDir = `${home}/.claude/skills/${GUARDRAIL_SKILL_NAME}`;
+  const targetPath = `${targetDir}/SKILL.md`;
+  try {
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(targetPath, content);
+    log("info", "guardrail_skill_installed", { path: targetPath });
+  } catch (err) {
+    log("warn", "guardrail_install_failed", { path: targetPath, error: String(err) });
+  }
+}
+
+function injectGuardrailCommand(session: string): void {
+  if (!ENABLE_GUARDRAILS) return;
+  const target = tmuxName(session);
+  // Mark the session busy ourselves so a /trigger arriving before the
+  // prompt hook fires won't be sent on top of the slash command.
+  writeState(session, { status: "busy", since: new Date().toISOString() });
+  Bun.spawnSync(["tmux", "send-keys", "-t", target, "-l", `/${GUARDRAIL_SKILL_NAME}`]);
+  Bun.spawnSync(["tmux", "send-keys", "-t", target, "Enter"]);
+  log("info", "guardrail_command_sent", { session });
+}
+
+async function waitForGuardrailComplete(session: string, maxWait = 30_000): Promise<void> {
+  if (!ENABLE_GUARDRAILS) return;
+  // Give the prompt hook time to transition state to busy (if our manual
+  // mark above was already overwritten) before we start polling for idle.
+  await Bun.sleep(300);
+  const start = Date.now();
+  while (Date.now() - start < maxWait) {
+    const state = readState(session);
+    if (state.status === "idle") return;
+    await Bun.sleep(200);
+  }
+  log("warn", "guardrail_idle_timeout", { session });
+}
+
 async function startClaudeSession(session: string, cwd: string): Promise<{ success: boolean; error?: string }> {
   if (isTmuxRunning(session)) {
     log("info", "session_reused", { session });
@@ -519,7 +574,7 @@ async function startClaudeSession(session: string, cwd: string): Promise<{ succe
     "tmux", "new-session", "-d", "-s", tmuxName(session), "-c", cwd,
     "-e", `HAIFLOW=1`,
     "-e", `HAIFLOW_PORT=${PORT}`,
-    "claude", "--dangerously-skip-permissions",
+    "claude", "--permission-mode", "auto",
   ]);
 
   if (result.exitCode !== 0) {
@@ -539,12 +594,16 @@ async function startClaudeSession(session: string, cwd: string): Promise<{ succe
   while (Date.now() - start < maxWait) {
     if (getSessionId(session) && isTuiInteractive(target)) {
       log("info", "session_started", { session, cwd, readyMs: Date.now() - start });
+      injectGuardrailCommand(session);
+      await waitForGuardrailComplete(session);
       return { success: true };
     }
     await Bun.sleep(100);
   }
 
   log("info", "session_started", { session, cwd, note: "ready timeout — session may still be initializing" });
+  injectGuardrailCommand(session);
+  await waitForGuardrailComplete(session);
   return { success: true };
 }
 
@@ -1005,10 +1064,22 @@ const server = Bun.serve({
       POST: authed(async (req) => {
         const body = await req.json();
         const session = sanitizeSession((body.session as string) || "default");
-        const cwd = body.cwd as string | undefined;
+        const requestedCwd = body.cwd as string | undefined;
 
-        if (!cwd) {
-          return Response.json({ error: "cwd is required" }, { status: 400 });
+        let cwd: string;
+        if (FORCED_CWD) {
+          if (requestedCwd && requestedCwd !== FORCED_CWD) {
+            log("warn", "session_start_cwd_overridden", { session, requested: requestedCwd, forced: FORCED_CWD });
+          }
+          cwd = FORCED_CWD;
+        } else if (!ALLOW_REQUEST_CWD) {
+          log("warn", "session_start_rejected", { session, reason: "request cwd disabled and HAIFLOW_CWD unset" });
+          return Response.json({ error: "cwd from request is disabled; set HAIFLOW_CWD on the server" }, { status: 400 });
+        } else {
+          if (!requestedCwd) {
+            return Response.json({ error: "cwd is required" }, { status: 400 });
+          }
+          cwd = requestedCwd;
         }
 
         const result = await startClaudeSession(session, cwd);
@@ -1159,6 +1230,8 @@ for (const dir of readdirSync(BASE_DIR).filter((d) => existsSync(`${BASE_DIR}/${
 
 log("info", "server_started", { port: server.port, auth: !!API_KEY });
 log("info", "sessions_recovered", { sessions: listSessions() });
+
+installGuardrailSkill();
 
 // Replay unprocessed events from previous run
 const unprocessed = await eventBus.getUnprocessedEvents();

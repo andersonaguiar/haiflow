@@ -51,6 +51,12 @@ function parseSSE(text: string): { messages?: string[]; error?: string } {
 }
 
 beforeAll(async () => {
+  // Kill any stale tmux sessions left behind by an aborted prior run.
+  // Without this, startClaudeSession sees a "running" session, skips
+  // launching Claude, and the new test sends prompts into a dead pane.
+  for (const name of ["integration-test", "chain-a", "chain-b"]) {
+    Bun.spawnSync(["tmux", "kill-session", "-t", name]);
+  }
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
 
   server = Bun.spawn(["bun", "run", "src/index.ts"], {
@@ -60,6 +66,9 @@ beforeAll(async () => {
       HAIFLOW_DATA_DIR: TEST_DIR,
       HAIFLOW_API_KEY: TEST_API_KEY,
       HAIFLOW_PORT: String(TEST_PORT),
+      // Plumbing tests don't exercise the guardrail skill — keep the
+      // session prompt-tip clean so test prompts aren't filtered.
+      HAIFLOW_GUARDRAILS: "false",
     },
     stdout: "ignore",
     stderr: "ignore",
@@ -118,9 +127,10 @@ describe("session lifecycle", () => {
       expect(status1.status).toBe(200);
       expect(status1.data.status).toBe("idle");
 
-      // 3. Trigger a prompt
+      // 3. Trigger a prompt — use a literal-echo task so the assertion is
+      // deterministic and doesn't depend on the model "thinking".
       const trigger = await api("/trigger", "POST", {
-        prompt: "What is 2+2? Reply with ONLY the number, nothing else.",
+        prompt: "Reply with the literal text: PONG-LIFE and nothing else.",
         session: "integration-test",
         id: "int-test-1",
         source: "integration-test",
@@ -146,9 +156,9 @@ describe("session lifecycle", () => {
       expect(parsed.messages).toBeDefined();
       expect(parsed.messages!.length).toBeGreaterThan(0);
 
-      // 7. The response should contain "4"
+      // 7. The response should contain the literal echo token
       const fullResponse = parsed.messages!.join("\n");
-      expect(fullResponse).toContain("4");
+      expect(fullResponse).toContain("PONG-LIFE");
 
       // 8. Verify response is persisted
       const response = await api("/responses/int-test-1?session=integration-test");
@@ -178,9 +188,9 @@ describe("queue draining", () => {
         cwd: "/tmp",
       });
 
-      // Send first prompt
+      // Send first prompt — literal echo, no model "thinking" required
       const trigger1 = await api("/trigger", "POST", {
-        prompt: "What is 3+3? Reply with ONLY the number.",
+        prompt: "Reply with the literal text: PONG-Q1 and nothing else.",
         session: "integration-test",
         id: "int-test-q1",
       });
@@ -188,7 +198,7 @@ describe("queue draining", () => {
 
       // Send second prompt while busy — should queue
       const trigger2 = await api("/trigger", "POST", {
-        prompt: "What is 5+5? Reply with ONLY the number.",
+        prompt: "Reply with the literal text: PONG-Q2 and nothing else.",
         session: "integration-test",
         id: "int-test-q2",
       });
@@ -201,7 +211,7 @@ describe("queue draining", () => {
       );
       const parsed1 = parseSSE(await sse1.text());
       expect(parsed1.messages).toBeDefined();
-      expect(parsed1.messages!.join("\n")).toContain("6");
+      expect(parsed1.messages!.join("\n")).toContain("PONG-Q1");
 
       // Wait for second response (auto-drained from queue)
       const sse2 = await fetch(
@@ -210,7 +220,7 @@ describe("queue draining", () => {
       );
       const parsed2 = parseSSE(await sse2.text());
       expect(parsed2.messages).toBeDefined();
-      expect(parsed2.messages!.join("\n")).toContain("10");
+      expect(parsed2.messages!.join("\n")).toContain("PONG-Q2");
 
       // Stop session
       await api("/session/stop", "POST", { session: "integration-test" });

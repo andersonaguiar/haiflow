@@ -160,6 +160,9 @@ cp .env.example .env
 | `HAIFLOW_DATA_DIR` | `/tmp/haiflow` | Directory for session state, queues, and responses |
 | `HAIFLOW_PORT` | `3333` | Port used by hook scripts (set if different from PORT) |
 | `HAIFLOW_API_KEY` | — | **Required.** Any string you choose — this is your own secret, not a paid key |
+| `HAIFLOW_CWD` | — | When set, every session is forced to use this cwd. The `cwd` field in `/session/start` request bodies is ignored (a warning is logged if it differs). |
+| `HAIFLOW_ALLOW_REQUEST_CWD` | `true` | When `false`, `/session/start` rejects requests that try to set their own `cwd` — `HAIFLOW_CWD` must be set on the server instead. |
+| `HAIFLOW_GUARDRAILS` | `true` | Installs `~/.claude/skills/haiflow-guardrails/SKILL.md` on server boot and injects `/haiflow-guardrails` into each new tmux session. The skill instructs Claude to refuse paths outside cwd, refuse to read secrets, and refuse network exfiltration. |
 | `REDIS_URL` | `redis://localhost:6379` | **Required.** Redis URL for event persistence and delivery tracking |
 | `N8N_API_KEY` | — | n8n API key for workflow integration |
 
@@ -217,7 +220,7 @@ Events: `server_started`, `sessions_recovered`, `session_started`, `session_stop
 
 ## How it works
 
-1. **`POST /session/start`** spawns Claude in a detached tmux session with `--dangerously-skip-permissions`
+1. **`POST /session/start`** spawns Claude in a detached tmux session with `--permission-mode auto`
 2. **`POST /trigger`** sends prompts via `tmux send-keys` (or queues if busy) and assigns a task ID
 3. **Claude Code hooks** forward lifecycle events (start, prompt, stop, end) to the haiflow server via HTTP
 4. On task completion, the server extracts assistant messages from the session transcript and saves them keyed by task ID
