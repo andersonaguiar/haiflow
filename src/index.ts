@@ -446,9 +446,18 @@ function sendToTmux(session: string, prompt: string): boolean {
 // tmux treats `send-keys "<text>" Enter` as one paste block — Enter becomes
 // a newline inside the input instead of a submit. Splitting into two calls
 // makes Enter arrive as a keystroke after the paste is committed.
+//
+// A brief sleep between the two calls is also required: `send-keys -l`
+// returns as soon as tmux has queued the paste, but the target TUI consumes
+// it asynchronously. Without the pause, the Enter occasionally arrives
+// mid-paste-processing and is either coalesced into the paste buffer or
+// silently dropped — leaving the prompt sitting unsubmitted in the input.
+// Most visible on long prompts that wrap in Claude Code's TUI input box,
+// where the redraw takes longer.
 function typeThenSubmit(target: string, text: string): boolean {
   const typed = Bun.spawnSync(["tmux", "send-keys", "-t", target, "-l", text]);
   if (typed.exitCode !== 0) return false;
+  Bun.sleepSync(150);
   const submitted = Bun.spawnSync(["tmux", "send-keys", "-t", target, "Enter"]);
   return submitted.exitCode === 0;
 }
