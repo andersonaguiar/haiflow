@@ -207,6 +207,7 @@ Enter your `HAIFLOW_API_KEY` to authenticate, then you get a two-panel layout:
 - **Left panel** — all sessions with live status badges (idle/busy/offline), remove offline sessions with ×
 - **Right panel** — current prompt (when busy), tabbed Queue/Responses/History view with expandable items showing full prompt and response text
 - **History tab** — every task's tool/command/diff timeline, token usage, duration, and "API cost avoided", plus rolling 5h/7d usage windows (see [Task history & savings](#task-history--savings))
+- **Live terminal** — read-only by default; click **Take control** to switch to a writable attach and type directly into a wedged session from the browser (gated by the API key; disable with `HAIFLOW_ALLOW_TAKEOVER=false`). While you hold the wheel, auto-drain pauses so the queue isn't typed over your input
 - **Actions** — start/stop sessions, send prompts, clear queue/responses
 
 The dashboard auto-refreshes every 3 seconds. No extra setup needed — it's served by the same Bun server.

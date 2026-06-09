@@ -39,6 +39,11 @@ const WATCHDOG_INTERVAL_MS = 15_000;
 const MAP_MAX_ITEMS = Number(process.env.HAIFLOW_MAP_MAX_ITEMS ?? 200) || 200;
 const MAP_TIMEOUT_MS = (Number(process.env.HAIFLOW_MAP_TIMEOUT_SEC ?? 1800) || 1800) * 1000;
 
+// Take-the-wheel: a writable browser terminal bypasses validateStructural and
+// the guardrail skill, so it is gated by the API key (the operator's root trust
+// boundary) and this kill-switch. Default on, since the key is already required.
+const ALLOW_TAKEOVER = (process.env.HAIFLOW_ALLOW_TAKEOVER ?? "true").toLowerCase() !== "false";
+
 function taskDeadline(): string | undefined {
   return TASK_TIMEOUT_SEC > 0 ? new Date(Date.now() + TASK_TIMEOUT_SEC * 1000).toISOString() : undefined;
 }
@@ -131,6 +136,9 @@ interface State {
   deadlineAt?: string;
   transcriptPath?: string;
   currentDedupKey?: string;
+  // Set while a human holds the wheel via the writable terminal, so auto-drain
+  // doesn't fire a queued prompt on top of their typing.
+  intervened?: boolean;
 }
 
 interface QueueItem {
@@ -632,6 +640,8 @@ function saveResponse(session: string, taskId: string, prompt?: string, transcri
 function drainQueue(session: string) {
   const state = readState(session);
   if (state.status !== "idle") return;
+  // A human is at the wheel via the writable terminal — don't type over them.
+  if (state.intervened) return;
 
   const queue = readQueue(session);
   const picked = pickNext(queue);
@@ -1813,7 +1823,12 @@ const server = Bun.serve({
           return Response.json({ error: "Session not running" }, { status: 404 });
         }
 
-        const upgraded = server.upgrade(req, { data: { session } });
+        // Control mode = a WRITABLE attach. It bypasses validateStructural and
+        // the guardrail skill, so it's gated behind the API key (checked above)
+        // and the HAIFLOW_ALLOW_TAKEOVER kill-switch.
+        const control = url.searchParams.get("mode") === "control" && ALLOW_TAKEOVER;
+
+        const upgraded = server.upgrade(req, { data: { session, control } });
         if (!upgraded) {
           return Response.json({ error: "WebSocket upgrade failed" }, { status: 500 });
         }
@@ -1824,20 +1839,30 @@ const server = Bun.serve({
   websocket: {
     open(ws: any) {
       const session = ws.data.session as string;
+      const control = !!ws.data.control;
       const target = tmuxName(session);
 
-      // Use `script` as PTY wrapper so tmux gets a real terminal
+      // Use `script` as a PTY wrapper so tmux gets a real terminal. In control
+      // mode we drop `-r` (read-only) so the attach is writable.
+      const ro = control ? [] : ["-r"];
       const cmd = process.platform === "darwin"
-        ? ["script", "-q", "/dev/null", "tmux", "attach-session", "-t", target, "-r"]
-        : ["script", "-qc", `tmux attach-session -t ${target} -r`, "/dev/null"];
+        ? ["script", "-q", "/dev/null", "tmux", "attach-session", "-t", target, ...ro]
+        : ["script", "-qc", `tmux attach-session -t ${target}${control ? "" : " -r"}`, "/dev/null"];
 
       const proc = Bun.spawn(cmd, {
+        stdin: control ? "pipe" : "ignore",
         stdout: "pipe",
         stderr: "ignore",
         env: { ...process.env, TERM: "xterm-256color" },
       });
 
       ws.data.proc = proc;
+
+      if (control) {
+        // Pause auto-drain while the human holds the wheel.
+        writeState(session, { intervened: true });
+        log("warn", "terminal_control_opened", { session });
+      }
 
       // Stream tmux output to the WebSocket via explicit reader
       const reader = proc.stdout.getReader();
@@ -1862,13 +1887,26 @@ const server = Bun.serve({
       log("info", "terminal_ws_opened", { session });
     },
 
-    message(_ws: any, _msg: any) {
-      // Read-only: ignore all input from the browser
+    message(ws: any, msg: any) {
+      // Only control-mode sockets accept input; view-mode ignores it.
+      if (!ws.data.control) return;
+      const stdin = ws.data.proc?.stdin;
+      if (!stdin) return;
+      try {
+        stdin.write(typeof msg === "string" ? msg : new Uint8Array(msg));
+        stdin.flush();
+      } catch {
+        // PTY closed
+      }
     },
 
     close(ws: any) {
       const session = ws.data.session as string;
       try { ws.data.proc?.kill(); } catch {}
+      if (ws.data.control) {
+        writeState(session, { intervened: false });
+        log("info", "terminal_control_closed", { session });
+      }
       log("info", "terminal_ws_closed", { session });
     },
   },

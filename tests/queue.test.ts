@@ -99,4 +99,22 @@ describe("smart queue", () => {
     const queue = await api(`/queue?session=${session}`);
     expect(queue.data.items[0].priority).toBe(9);
   });
+
+  test("an intervened session is not auto-drained (take-the-wheel)", async () => {
+    const session = "q-intervened";
+    const claudeId = `claude-${session}`;
+    const dir = `${TEST_DIR}/${session}`;
+    mkdirSync(`${dir}/responses`, { recursive: true });
+    writeFileSync(`${dir}/session-id`, claudeId);
+    writeFileSync(`${dir}/state.json`, JSON.stringify({ status: "busy", since: new Date().toISOString(), currentTaskId: "cur", intervened: true }));
+    await api("/trigger", "POST", { prompt: "queued while human drives", session, id: "iv-1" });
+
+    // Stopping the current task would normally drain the queue; intervention pauses it.
+    await api("/hooks/stop", "POST", { session_id: claudeId, last_assistant_message: "done" });
+
+    const status = await api(`/status?session=${session}`);
+    expect(status.data.status).toBe("idle");
+    const queue = await api(`/queue?session=${session}`);
+    expect(queue.data.length).toBe(1); // not drained
+  });
 });
