@@ -56,6 +56,16 @@ export async function clearQueue(session: string) {
   return res.json();
 }
 
+export async function cancelQueueItem(session: string, id: string) {
+  const res = await apiFetch(`/queue/${encodeURIComponent(id)}?session=${session}`, { method: "DELETE" });
+  return { status: res.status, data: await res.json() };
+}
+
+export async function cancelTask(session: string, id: string) {
+  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}/cancel?session=${session}`, { method: "POST" });
+  return { status: res.status, data: await res.json() };
+}
+
 export async function getResponses(session: string) {
   const res = await apiFetch(`/responses?session=${session}`);
   return res.json();

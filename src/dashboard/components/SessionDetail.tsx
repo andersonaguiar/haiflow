@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from "react";
-import { getStatus, getQueue, getResponses, getResponse, clearQueue, clearResponses, stopSession, interruptSession, AuthError } from "../api";
+import { getStatus, getQueue, getResponses, getResponse, clearQueue, clearResponses, stopSession, interruptSession, cancelQueueItem, AuthError } from "../api";
 import { TriggerForm } from "./TriggerForm";
 import { TerminalView } from "./TerminalView";
 import { HistoryView } from "./HistoryView";
@@ -56,17 +56,26 @@ function ExpandableResponse({ session, id, completedAt }: { session: string; id:
   );
 }
 
-function ExpandableQueueItem({ item }: { item: QueueItem }) {
+function ExpandableQueueItem({ item, onCancel }: { item: QueueItem; onCancel: (id: string) => void }) {
   const [open, setOpen] = useState(false);
 
   return (
     <div className="border-b border-gray-800 last:border-b-0">
-      <button onClick={() => setOpen(!open)} className="w-full text-left px-3 py-2 flex items-center gap-3 hover:bg-gray-800/50 transition-colors text-sm">
-        <span className="text-gray-400 font-mono text-xs truncate flex-1">{item.id}</span>
-        <span className="text-gray-300 truncate max-w-48" title={item.prompt}>{item.prompt}</span>
+      <div className="w-full px-3 py-2 flex items-center gap-3 hover:bg-gray-800/50 transition-colors text-sm">
+        <button onClick={() => setOpen(!open)} className="flex items-center gap-3 text-left flex-1 min-w-0">
+          <span className="text-gray-400 font-mono text-xs truncate">{item.id}</span>
+          <span className="text-gray-300 truncate max-w-48" title={item.prompt}>{item.prompt}</span>
+        </button>
         <span className="text-xs text-gray-600 shrink-0">{timeAgo(item.addedAt)}</span>
-        <span className="text-xs text-gray-600 shrink-0">{open ? "−" : "+"}</span>
-      </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onCancel(item.id); }}
+          className="text-xs text-red-400/70 hover:text-red-300 shrink-0"
+          title="Remove from queue"
+        >
+          ×
+        </button>
+        <button onClick={() => setOpen(!open)} className="text-xs text-gray-600 shrink-0">{open ? "−" : "+"}</button>
+      </div>
       {open && (
         <div className="px-3 pb-3 animate-[fadeIn_150ms_ease-out]">
           {item.source && (
@@ -164,6 +173,12 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
   const handleClearQueue = async () => {
     await clearQueue(session);
     toast("Queue cleared", "success");
+    fetchAll();
+  };
+
+  const handleCancelQueueItem = async (id: string) => {
+    await cancelQueueItem(session, id);
+    toast("Removed from queue", "success");
     fetchAll();
   };
 
@@ -272,7 +287,7 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
             ) : (
               <Card>
                 {queue.map((item) => (
-                  <ExpandableQueueItem key={item.id} item={item} />
+                  <ExpandableQueueItem key={item.id} item={item} onCancel={handleCancelQueueItem} />
                 ))}
               </Card>
             )

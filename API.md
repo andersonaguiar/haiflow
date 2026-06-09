@@ -199,6 +199,28 @@ Get one task by ID (optionally scoped with `?session=`). Includes the saved resp
 
 The tool/command/diff timeline for a task: `steps`, `durationMs`, `usage`, `model`, `filesChanged`, `commandsRun`.
 
+### `POST /tasks/:id/cancel`
+
+Cancel a single task without killing the warm session or clearing the whole queue.
+
+```bash
+curl -X POST -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  "http://localhost:3333/tasks/task-001/cancel?session=worker"
+```
+
+- If `id` is the session's running task: sends Escape, records a `cancelled` task + response, returns the session to idle, and drains the next queued prompt. Returns `{ "cancelled": true, "where": "running" }`.
+- If `id` is a queued item: removes just that item. Returns `{ "cancelled": true, "where": "queue" }`.
+- `404` if the id is neither running nor queued for that session.
+
+### `DELETE /queue/:id`
+
+Remove a single queued item by id (vs `DELETE /queue`, which clears the whole queue).
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  "http://localhost:3333/queue/task-001?session=worker"
+```
+
 ## Usage & savings
 
 haiflow runs on a flat Claude Code subscription, so tasks cost nothing per-token. These endpoints report measured token consumption and the equivalent API cost a per-token caller would have paid (an estimate from a maintained price table, not a bill).

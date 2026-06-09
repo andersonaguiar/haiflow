@@ -120,3 +120,63 @@ describe("task ledger endpoints", () => {
     expect(status).toBe(404);
   });
 });
+
+describe("task cancellation", () => {
+  test("DELETE /queue/:id removes one item, leaves the rest", async () => {
+    const session = "cancel-queue";
+    mkdirSync(`${TEST_DIR}/${session}/responses`, { recursive: true });
+    writeFileSync(`${TEST_DIR}/${session}/state.json`, JSON.stringify({ status: "busy", since: new Date().toISOString(), currentTaskId: "running" }));
+    await api("/trigger", "POST", { prompt: "a", session, id: "q-a" });
+    await api("/trigger", "POST", { prompt: "b", session, id: "q-b" });
+
+    const del = await api(`/queue/q-a?session=${session}`, "DELETE");
+    expect(del.status).toBe(200);
+    expect(del.data.removed).toBe(true);
+
+    const queue = await api(`/queue?session=${session}`);
+    expect(queue.data.items.map((i: any) => i.id)).toEqual(["q-b"]);
+
+    const missing = await api(`/queue/nope?session=${session}`, "DELETE");
+    expect(missing.status).toBe(404);
+  });
+
+  test("POST /tasks/:id/cancel plucks a queued task", async () => {
+    const session = "cancel-q2";
+    mkdirSync(`${TEST_DIR}/${session}/responses`, { recursive: true });
+    writeFileSync(`${TEST_DIR}/${session}/state.json`, JSON.stringify({ status: "busy", since: new Date().toISOString(), currentTaskId: "running" }));
+    await api("/trigger", "POST", { prompt: "x", session, id: "qc-1" });
+
+    const res = await api(`/tasks/qc-1/cancel?session=${session}`, "POST");
+    expect(res.status).toBe(200);
+    expect(res.data.where).toBe("queue");
+    const queue = await api(`/queue?session=${session}`);
+    expect(queue.data.length).toBe(0);
+  });
+
+  test("POST /tasks/:id/cancel stops the running task and frees the session", async () => {
+    const session = "cancel-running";
+    mkdirSync(`${TEST_DIR}/${session}/responses`, { recursive: true });
+    writeFileSync(`${TEST_DIR}/${session}/state.json`, JSON.stringify({
+      status: "busy", since: new Date().toISOString(), currentTaskId: "run-1", currentPrompt: "long job",
+    }));
+
+    const res = await api(`/tasks/run-1/cancel?session=${session}`, "POST");
+    expect(res.status).toBe(200);
+    expect(res.data.where).toBe("running");
+
+    const status = await api(`/status?session=${session}`);
+    expect(status.data.status).toBe("idle");
+
+    const resp = await api(`/responses/run-1?session=${session}`);
+    expect(resp.status).toBe(200);
+    expect(resp.data.messages.join(" ")).toContain("cancelled");
+
+    const task = await api(`/tasks/run-1?session=${session}`);
+    expect(task.data.status).toBe("cancelled");
+  });
+
+  test("POST /tasks/:id/cancel 404s for an unknown task", async () => {
+    const res = await api(`/tasks/ghost/cancel?session=cancel-running`, "POST");
+    expect(res.status).toBe(404);
+  });
+});

@@ -786,6 +786,21 @@ const server = Bun.serve({
       }),
     },
 
+    // Remove a single queued item by id (vs DELETE /queue which clears all).
+    "/queue/:id": {
+      DELETE: authed((req) => {
+        const session = getSessionParam(req);
+        const id = sanitizeId(req.params.id);
+        const queue = readQueue(session);
+        const idx = queue.findIndex((q) => q.id === id);
+        if (idx === -1) return Response.json({ error: "Queued item not found" }, { status: 404 });
+        queue.splice(idx, 1);
+        writeQueue(session, queue);
+        log("info", "queue_item_removed", { session, taskId: id });
+        return Response.json({ session, id, removed: true });
+      }),
+    },
+
     // --- Pipeline ---
 
     "/pipeline": {
@@ -1051,6 +1066,43 @@ const server = Bun.serve({
           steps: task.steps, usage: task.usage, savedUsd: task.saved_usd,
           filesChanged: task.files_changed, commandsRun: task.commands_run,
         });
+      }),
+    },
+
+    // Cancel a single task — running or queued — without killing the warm
+    // session or clearing the whole queue. Handler is fully synchronous so the
+    // read-modify-write of state/queue is atomic against the file state.
+    "/tasks/:id/cancel": {
+      POST: authed((req) => {
+        const session = getSessionParam(req);
+        const id = sanitizeId(req.params.id);
+        const state = readState(session);
+
+        // Running task: interrupt it, record the cancel, free the session.
+        if (state.status === "busy" && state.currentTaskId === id) {
+          sendInterrupt(session, "escape");
+          saveResponse(session, id, state.currentPrompt, undefined, "[haiflow] task cancelled by operator");
+          recordTaskFinish({ id, session, status: "cancelled", error: "cancelled by operator" });
+          writeState(session, {
+            status: "idle", since: new Date().toISOString(),
+            waiting: false, waitingMessage: undefined, waitingSince: undefined, deadlineAt: undefined,
+          });
+          drainQueue(session);
+          log("info", "task_cancelled", { session, taskId: id, where: "running" });
+          return Response.json({ cancelled: true, session, id, where: "running" });
+        }
+
+        // Queued task: pluck just this item out of the FIFO.
+        const queue = readQueue(session);
+        const idx = queue.findIndex((q) => q.id === id);
+        if (idx !== -1) {
+          queue.splice(idx, 1);
+          writeQueue(session, queue);
+          log("info", "task_cancelled", { session, taskId: id, where: "queue" });
+          return Response.json({ cancelled: true, session, id, where: "queue" });
+        }
+
+        return Response.json({ error: "Task is not running or queued for this session" }, { status: 404 });
       }),
     },
 
