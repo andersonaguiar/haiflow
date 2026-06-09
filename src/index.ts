@@ -11,6 +11,7 @@ import {
   extractFromTranscript, usageSince,
 } from "./ledger";
 import { estimateSavings } from "./pricing";
+import { verifySignature, buildFramedPrompt, type IngestRecipe } from "./ingest";
 
 const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
@@ -205,6 +206,27 @@ function readPipeline(): PipelineConfig {
   } catch {
     log("warn", "pipeline_config_invalid", { file });
     return EMPTY_PIPELINE;
+  }
+}
+
+// Inbound webhook recipes (ingest.json in HAIFLOW_DATA_DIR), re-read on change.
+let cachedIngest: Record<string, IngestRecipe> | null = null;
+let cachedIngestMtime = 0;
+let cachedIngestSize = 0;
+
+function readIngestConfig(): Record<string, IngestRecipe> {
+  const file = `${BASE_DIR}/ingest.json`;
+  if (!existsSync(file)) { cachedIngest = null; return {}; }
+  const stat = statSync(file);
+  if (cachedIngest && stat.mtimeMs === cachedIngestMtime && stat.size === cachedIngestSize) return cachedIngest;
+  try {
+    cachedIngest = JSON.parse(readFileSync(file, "utf-8")) as Record<string, IngestRecipe>;
+    cachedIngestMtime = stat.mtimeMs;
+    cachedIngestSize = stat.size;
+    return cachedIngest;
+  } catch {
+    log("warn", "ingest_config_invalid", { file });
+    return {};
   }
 }
 
@@ -1110,6 +1132,62 @@ const server = Bun.serve({
           reduceTaskId: run.reduceTaskId,
         });
       }),
+    },
+
+    // --- Signed inbound webhook gateway ---
+    // No bearer auth: authenticity is proven by the per-source HMAC over the
+    // raw body. Meant to be reachable by third-party SaaS webhooks.
+    "/ingest/:source": {
+      POST: async (req) => {
+        const source = sanitizeSession(req.params.source);
+        const recipe = readIngestConfig()[source];
+        if (!recipe) return Response.json({ error: "Unknown ingest source" }, { status: 404 });
+
+        const rawBody = await req.text();
+        if (rawBody.length > MAX_PROMPT_SIZE) return Response.json({ error: "payload too large" }, { status: 413 });
+
+        const headers: Record<string, string> = {};
+        req.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
+
+        const verify = verifySignature(recipe, rawBody, headers);
+        if (!verify.ok) {
+          log("warn", "ingest_rejected", { source, reason: verify.reason });
+          return Response.json({ error: "Signature verification failed" }, { status: 401 });
+        }
+
+        // Replay protection: each signature/nonce may be used once (needs Redis).
+        if (verify.nonce) {
+          const fresh = await eventBus.markNonce(`ingest:${source}:${verify.nonce}`, recipe.maxAgeSec ?? 300);
+          if (!fresh) {
+            log("warn", "ingest_replay", { source });
+            return Response.json({ error: "Replay detected" }, { status: 409 });
+          }
+        }
+
+        let body: unknown;
+        try { body = JSON.parse(rawBody); } catch { body = { raw: rawBody }; }
+
+        const prompt = buildFramedPrompt(recipe, body, source);
+        if (prompt.length > MAX_PROMPT_SIZE) return Response.json({ error: "rendered prompt too large" }, { status: 413 });
+        const check = validateStructural(prompt);
+        if (!check.ok) {
+          log("warn", "ingest_prompt_rejected", { source, reason: check.reason });
+          return Response.json({ error: `Rejected: ${check.reason}` }, { status: 400 });
+        }
+
+        if (recipe.target === "publish") {
+          if (!recipe.topic) return Response.json({ error: "recipe.topic required for publish target" }, { status: 400 });
+          await publishEvent(recipe.topic, { session: "external", taskId: generateId(), message: prompt, external: true });
+          log("info", "ingest_published", { source, topic: recipe.topic });
+          return Response.json({ ingested: true, source, target: "publish", topic: recipe.topic });
+        }
+
+        const session = sanitizeSession(recipe.session ?? "default");
+        const id = generateId();
+        const where = dispatchOrQueue(session, prompt, { id, source: `ingest:${source}` });
+        log("info", "ingest_triggered", { source, session, taskId: id, where });
+        return Response.json({ ingested: true, source, target: "trigger", session, id, where });
+      },
     },
 
     // --- Pipeline ---

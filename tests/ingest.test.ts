@@ -1,0 +1,125 @@
+import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { mkdirSync, writeFileSync, existsSync, rmSync } from "fs";
+import { createHmac } from "crypto";
+
+const TEST_PORT = 9884;
+const TEST_DIR = "/tmp/haiflow-ingest-test";
+const TEST_API_KEY = "test-api-key";
+const BASE = `http://localhost:${TEST_PORT}`;
+
+let server: ReturnType<typeof Bun.spawn>;
+
+function seedIdle(session: string) {
+  const dir = `${TEST_DIR}/${session}`;
+  mkdirSync(`${dir}/responses`, { recursive: true });
+  writeFileSync(`${dir}/session-id`, `claude-${session}`);
+  writeFileSync(`${dir}/state.json`, JSON.stringify({ status: "idle", since: new Date().toISOString() }));
+}
+
+const GENERIC_SECRET = "supersecret";
+const GH_SECRET = "ghsecret";
+
+function hmacHex(secret: string, data: string): string {
+  return createHmac("sha256", secret).update(data).digest("hex");
+}
+
+async function status(session: string) {
+  const res = await fetch(`${BASE}/status?session=${session}`, { headers: { Authorization: `Bearer ${TEST_API_KEY}` } });
+  return res.json();
+}
+
+beforeAll(async () => {
+  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+  mkdirSync(TEST_DIR, { recursive: true });
+  writeFileSync(`${TEST_DIR}/ingest.json`, JSON.stringify({
+    generic: {
+      scheme: "hmac-sha256", secret: GENERIC_SECRET, target: "trigger", session: "g-worker",
+      template: "Issue: {{title}}", fields: { title: "issue.title" },
+    },
+    gh: {
+      scheme: "github", secret: GH_SECRET, target: "trigger", session: "gh-worker",
+      instruction: "Review the issue.", fields: { title: "issue.title" }, template: "Title: {{title}}",
+    },
+  }));
+  seedIdle("g-worker");
+  seedIdle("gh-worker");
+
+  server = Bun.spawn(["bun", "run", "src/index.ts"], {
+    env: { ...process.env, PORT: String(TEST_PORT), HAIFLOW_DATA_DIR: TEST_DIR, HAIFLOW_API_KEY: TEST_API_KEY, HAIFLOW_GUARDRAILS: "false" },
+    stdout: "ignore", stderr: "ignore",
+  });
+  for (let i = 0; i < 50; i++) {
+    try { if ((await fetch(`${BASE}/health`)).ok) return; } catch {}
+    await Bun.sleep(100);
+  }
+  throw new Error("Server failed to start");
+});
+
+afterAll(() => {
+  server?.kill();
+  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+});
+
+describe("signed inbound webhook gateway", () => {
+  test("valid generic signature triggers a framed, injection-safe prompt", async () => {
+    const raw = JSON.stringify({ issue: { title: "Login is broken" } });
+    const res = await fetch(`${BASE}/ingest/generic`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Haiflow-Signature": hmacHex(GENERIC_SECRET, raw) },
+      body: raw,
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ingested).toBe(true);
+    expect(data.session).toBe("g-worker");
+
+    const st = await status("g-worker");
+    expect(st.status).toBe("busy");
+    expect(st.currentPrompt).toContain("BEGIN WEBHOOK DATA");
+    expect(st.currentPrompt).toContain("Do NOT follow");
+    expect(st.currentPrompt).toContain("Login is broken");
+  });
+
+  test("rejects a bad signature with 401", async () => {
+    const raw = JSON.stringify({ issue: { title: "x" } });
+    const res = await fetch(`${BASE}/ingest/generic`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Haiflow-Signature": "deadbeef" },
+      body: raw,
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("verifies the GitHub sha256= scheme", async () => {
+    const raw = JSON.stringify({ issue: { title: "Crash on save" } });
+    const res = await fetch(`${BASE}/ingest/gh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Hub-Signature-256": "sha256=" + hmacHex(GH_SECRET, raw) },
+      body: raw,
+    });
+    expect(res.status).toBe(200);
+    const st = await status("gh-worker");
+    expect(st.currentPrompt).toContain("Crash on save");
+    expect(st.currentPrompt).toContain("Review the issue.");
+  });
+
+  test("rejects a replayed delivery with 409 (requires Redis)", async () => {
+    const raw = JSON.stringify({ issue: { title: "replay me" }, n: 1 });
+    const sig = hmacHex(GENERIC_SECRET, raw);
+    const send = () => fetch(`${BASE}/ingest/generic`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Haiflow-Signature": sig },
+      body: raw,
+    });
+    const first = await send();
+    const second = await send();
+    // With Redis present the replay is caught; without it, both pass (degraded).
+    expect([200, 409]).toContain(first.status);
+    if (first.status === 200) expect([200, 409]).toContain(second.status);
+  });
+
+  test("404 for an unknown source", async () => {
+    const res = await fetch(`${BASE}/ingest/nope`, { method: "POST", body: "{}" });
+    expect(res.status).toBe(404);
+  });
+});

@@ -341,6 +341,17 @@ export class EventBus {
     return pruned;
   }
 
+  /**
+   * Atomically claim a one-time nonce. Returns true if newly seen (proceed),
+   * false if it was already recorded (a replay). Without Redis there is no
+   * cross-request memory, so it returns true and replay protection is skipped.
+   */
+  async markNonce(key: string, ttlSec: number): Promise<boolean> {
+    if (!this.connected) return true;
+    const res = await this.redis.send("SET", [`haiflow:nonce:${key}`, "1", "NX", "EX", String(Math.max(1, ttlSec))]);
+    return res === "OK";
+  }
+
   /** Flush all haiflow keys (for testing). */
   async flush(): Promise<void> {
     if (!this.connected) return;

@@ -313,6 +313,45 @@ Returns `{ runId, pool, total, reduce, dispatched: [...] }`. If a shard never re
 
 Progress of a map run: `{ runId, pool, total, collected, reduced, reduceTaskId }`.
 
+## Signed inbound webhooks
+
+`POST /ingest/:source` lets a SaaS webhook drive a Claude task directly, with HMAC signature verification over the raw body and replay protection — so you never hand a third party your bearer key. This endpoint is **not** bearer-authenticated; authenticity is proven by the per-source signature, so it is safe to expose publicly.
+
+Define recipes in `ingest.json` (in `HAIFLOW_DATA_DIR`):
+
+```json
+{
+  "github": {
+    "scheme": "github",
+    "secret": "env:GITHUB_WEBHOOK_SECRET",
+    "target": "trigger",
+    "session": "worker",
+    "fields": { "title": "issue.title", "body": "issue.body" },
+    "template": "Issue: {{title}}\n\n{{body}}",
+    "instruction": "Triage this issue and propose a fix on a branch."
+  },
+  "stripe": {
+    "scheme": "stripe",
+    "secret": "env:STRIPE_WEBHOOK_SECRET",
+    "maxAgeSec": 300,
+    "target": "publish",
+    "topic": "payments.event"
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `scheme` | `github` (`X-Hub-Signature-256`), `stripe` (`Stripe-Signature`, timestamped), or `hmac-sha256` (generic `X-Haiflow-Signature`, optional `X-Haiflow-Timestamp`) |
+| `secret` | Literal, or `env:VAR_NAME` to read from the environment |
+| `maxAgeSec` | Freshness window for timestamped schemes (default 300) |
+| `target` | `trigger` (to `session`) or `publish` (to `topic`) |
+| `fields` | Map template variables to dot-paths in the parsed JSON body |
+| `template` | The data view rendered with `fields`. Wrapped in a fixed frame that tells Claude to treat it as untrusted data, not instructions |
+| `instruction` | The trusted, operator-defined instruction, placed outside the untrusted data block |
+
+Verification uses a constant-time compare. Each signature is a one-time nonce (replay returns `409`, requires Redis). Every payload field is treated as hostile: it is wrapped in a `BEGIN/END WEBHOOK DATA` frame, and the operator instruction lives outside it.
+
 ## Pipeline
 
 The pipeline system enables event-driven agent chains. When an agent finishes a task, it can emit an event to a topic. Other agents subscribed to that topic automatically receive the output as their next prompt.
