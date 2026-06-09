@@ -281,6 +281,19 @@ Now message the bot — each message runs as a prompt and Claude's reply comes b
 
 > ⚠️ **Lock it down.** Messaging the bot drives Claude Code on your machine. Always set `TELEGRAM_ALLOWED_CHAT_IDS` — with it empty, the bot replies to anyone who finds it. To find your chat ID, message the bot once and read it from the logs (`chat_rejected`/`prompt_received`), or ask [@userinfobot](https://t.me/userinfobot). The `haiflow-guardrails` skill (file/secret/network restrictions) still applies as defence-in-depth.
 
+### GitHub bridge
+
+Mention `@haiflow` in a GitHub issue or PR comment and Claude Code addresses it in the locally checked-out repo: on a branch, as a **draft** PR, never touching the default branch. The bridge is a thin, gated relay; Claude does the branch/commit/PR work itself (it has `gh` and `git` in the session).
+
+```bash
+# point GITHUB_SESSION at a session whose cwd is the cloned repo
+haiflow github          # or: bun run github
+```
+
+It listens for GitHub webhooks (default port `3334`), verifies the `X-Hub-Signature-256` HMAC against `GITHUB_WEBHOOK_SECRET`, and only acts when **both** `GITHUB_ALLOWED_REPOS` and `GITHUB_ALLOWED_SENDERS` match.
+
+> ⚠️ **Both allowlists are the trust boundary.** With either empty, every webhook is refused. Anyone who can comment on an allowlisted repo can drive Claude, so keep the repo and sender lists tight. The comment text is treated as untrusted input (wrapped in a data frame), and Claude is instructed to open a draft PR and never push the default branch — but review its PRs before merging.
+
 ### Cron job
 
 ```bash

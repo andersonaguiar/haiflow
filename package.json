@@ -11,6 +11,7 @@
     "dev": "bun --hot src/index.ts",
     "start": "bun run src/index.ts",
     "telegram": "bun run src/telegram-bot.ts",
+    "github": "bun run src/github-bot.ts",
     "postinstall": "bash bin/postinstall.sh",
     "setup": "bun run bin/haiflow.ts setup",
     "deps": "bash bin/check-deps.sh",

@@ -9,6 +9,7 @@ const PACKAGE_ROOT = dirname(import.meta.dir);
 const HOOKS_DIR = resolve(PACKAGE_ROOT, "hooks");
 const SERVER_ENTRY = resolve(PACKAGE_ROOT, "src/index.ts");
 const TELEGRAM_ENTRY = resolve(PACKAGE_ROOT, "src/telegram-bot.ts");
+const GITHUB_ENTRY = resolve(PACKAGE_ROOT, "src/github-bot.ts");
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -58,6 +59,15 @@ async function telegram() {
     process.exit(1);
   }
   await import(TELEGRAM_ENTRY);
+}
+
+async function github() {
+  if (!existsSync(GITHUB_ENTRY)) {
+    console.error(`GitHub bridge entry not found at ${GITHUB_ENTRY}`);
+    console.error(`The haiflow package may be incomplete — try reinstalling.`);
+    process.exit(1);
+  }
+  await import(GITHUB_ENTRY);
 }
 
 async function setup() {
@@ -202,6 +212,7 @@ Usage: haiflow <command> [options]
 Commands:
   serve                          Run the haiflow server (this process)
   telegram                       Run the Telegram bot bridge (this process)
+  github                         Run the GitHub webhook bridge (this process)
   setup                          Install Claude Code hooks
   start <session> --cwd <path>   Start a Claude session
   stop [session]                 Stop a Claude session
@@ -239,6 +250,9 @@ switch (command) {
     break;
   case "telegram":
     await telegram();
+    break;
+  case "github":
+    await github();
     break;
   case "setup":
     await setup();
