@@ -199,10 +199,19 @@ http://localhost:3333/dashboard
 Enter your `HAIFLOW_API_KEY` to authenticate, then you get a two-panel layout:
 
 - **Left panel** — all sessions with live status badges (idle/busy/offline), remove offline sessions with ×
-- **Right panel** — current prompt (when busy), tabbed Queue/Responses view with expandable items showing full prompt and response text
+- **Right panel** — current prompt (when busy), tabbed Queue/Responses/History view with expandable items showing full prompt and response text
+- **History tab** — every task's tool/command/diff timeline, token usage, duration, and "API cost avoided", plus rolling 5h/7d usage windows (see [Task history & savings](#task-history--savings))
 - **Actions** — start/stop sessions, send prompts, clear queue/responses
 
 The dashboard auto-refreshes every 3 seconds. No extra setup needed — it's served by the same Bun server.
+
+## Task history & savings
+
+Every task is recorded in a durable SQLite ledger (`haiflow.db` in `HAIFLOW_DATA_DIR`). On completion, haiflow mines the same Claude Code transcript it parses for the Stop hook and stores what the task actually did: the ordered tool calls, commands run, files changed, real diffs, token usage, model, and timing. Query it via `GET /tasks`, `GET /tasks/:id`, and `GET /responses/:id/timeline`, or browse it in the dashboard's History tab.
+
+Because haiflow runs on a flat Claude Code subscription, tasks cost nothing per-token. `GET /usage` and `GET /usage/window` report measured token consumption over rolling 5-hour and 7-day windows (the subscription rate-limit windows) alongside the equivalent API cost a per-token caller would have paid — the savings the tool exists to deliver. The dollar figure is an estimate from a maintained price table, not a bill. Set `HAIFLOW_USAGE_ALERT_TOKENS` to get an alert-only flag when the 5h window crosses a threshold (it never throttles work).
+
+> Durability note: the ledger lives in `HAIFLOW_DATA_DIR`, which defaults to `/tmp/haiflow` and is wiped on reboot. Point it at a persistent directory to keep history across restarts.
 
 ## Logging
 
@@ -242,6 +251,29 @@ Import the chained calc workflow from `examples/chained-calc/`:
 - `chained-calc-step2.json` — Step 2: multiply result by 5
 - `chained-calc-step3.json` — Step 3: multiply result by 10
 - `pipeline-calc-chain.json` — Pipeline configuration that wires them together
+
+### Telegram bot
+
+Drive haiflow from a Telegram chat. The bundled bot long-polls Telegram, forwards each message to `POST /trigger`, streams the response back, and replies in the same chat — no public webhook or extra infrastructure needed.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
+2. Add it to your `.env` (alongside the existing `HAIFLOW_API_KEY`):
+
+   ```bash
+   TELEGRAM_BOT_TOKEN=123456:ABC-your-bot-token
+   TELEGRAM_SESSION=worker                 # which session to drive (default: "default")
+   TELEGRAM_ALLOWED_CHAT_IDS=123456789     # comma-separated allowlist (see below)
+   ```
+
+3. Start the bot in its own process (the haiflow server and a session must be running):
+
+   ```bash
+   haiflow telegram         # or: bun run telegram
+   ```
+
+Now message the bot — each message runs as a prompt and Claude's reply comes back in the chat. Slash commands you've configured (e.g. `/daily-update`) work too; `/start` and `/help` are handled by the bot itself.
+
+> ⚠️ **Lock it down.** Messaging the bot drives Claude Code on your machine. Always set `TELEGRAM_ALLOWED_CHAT_IDS` — with it empty, the bot replies to anyone who finds it. To find your chat ID, message the bot once and read it from the logs (`chat_rejected`/`prompt_received`), or ask [@userinfobot](https://t.me/userinfobot). The `haiflow-guardrails` skill (file/secret/network restrictions) still applies as defence-in-depth.
 
 ### Cron job
 
@@ -414,6 +446,7 @@ See `examples/chained-calc/pipeline-calc-chain.json` for a chained calc workflow
 haiflow/
 ├── src/
 │   ├── index.ts              # Bun HTTP server
+│   ├── telegram-bot.ts       # Telegram → haiflow bridge (haiflow telegram)
 │   └── dashboard/            # Web dashboard (React + Tailwind)
 │       ├── index.html
 │       ├── app.tsx
@@ -451,6 +484,7 @@ haiflow/
 | `bun run setup` | Install Claude Code hooks |
 | `bun run dev` | Start server with hot reload |
 | `bun run start` | Start server |
+| `bun run telegram` | Run the Telegram bot bridge |
 | `bun run deps` | Check all dependencies |
 | `bun run doctor` | Full health check (server, n8n, sessions, pipeline) |
 | `bun test` | Run tests |

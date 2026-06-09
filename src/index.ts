@@ -6,6 +6,11 @@ import {
   isAllowedTranscriptPath, renderTemplate,
 } from "./utils";
 import { EventBus } from "./events";
+import {
+  initLedger, recordTaskStart, recordTaskFinish, queryTasks, getTask,
+  extractFromTranscript, usageSince,
+} from "./ledger";
+import { estimateSavings } from "./pricing";
 
 const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
@@ -26,6 +31,7 @@ if (!API_KEY) {
 }
 
 mkdirSync(BASE_DIR, { recursive: true });
+initLedger(BASE_DIR);
 const eventBus = await EventBus.create(REDIS_URL);
 
 // --- Structured logging ---
@@ -232,6 +238,7 @@ async function deliverToSubscribers(
       currentTaskId: taskId,
       currentChain: chain,
     });
+    recordTaskStart({ id: taskId, session: subscriberSession, prompt, source: `pipeline:${topic}`, chain });
     sendToTmux(subscriberSession, prompt);
     log("info", "pipeline_dispatched", { topic, subscriber: subscriberSession, taskId });
     if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "delivered");
@@ -507,6 +514,7 @@ function drainQueue(session: string) {
     currentTaskId: next.id,
     currentChain: next.chain,
   });
+  recordTaskStart({ id: next.id, session, prompt: next.prompt, source: next.source ?? "queue", chain: next.chain });
 
   sendToTmux(session, next.prompt);
   log("info", "queue_drained", { session, taskId: next.id, remaining: queue.length });
@@ -713,9 +721,11 @@ const server = Bun.serve({
           currentPrompt: prompt,
           currentTaskId: id,
         });
+        recordTaskStart({ id, session, prompt, source: source ?? "trigger" });
 
         const sent = sendToTmux(session, prompt);
         if (!sent) {
+          recordTaskFinish({ id, session, status: "failed", error: "send to tmux failed" });
           log("error", "trigger_failed", { session, taskId: id });
           return Response.json({ error: "Failed to send to tmux session" }, { status: 500 });
         }
@@ -955,6 +965,89 @@ const server = Bun.serve({
       }),
     },
 
+    // --- Task ledger ---
+
+    "/tasks": {
+      GET: authed((req) => {
+        const url = new URL(req.url);
+        const sessionParam = url.searchParams.get("session");
+        const limitParam = url.searchParams.get("limit");
+        const offsetParam = url.searchParams.get("offset");
+        const { tasks, total } = queryTasks({
+          session: sessionParam ? sanitizeSession(sessionParam) : undefined,
+          status: url.searchParams.get("status") ?? undefined,
+          source: url.searchParams.get("source") ?? undefined,
+          since: url.searchParams.get("since") ?? undefined,
+          until: url.searchParams.get("until") ?? undefined,
+          limit: limitParam ? Number(limitParam) : undefined,
+          offset: offsetParam ? Number(offsetParam) : undefined,
+        });
+        return Response.json({ tasks, total });
+      }),
+    },
+
+    "/tasks/:id": {
+      GET: authed((req) => {
+        const id = sanitizeId(req.params.id);
+        const url = new URL(req.url);
+        const sessionParam = url.searchParams.get("session");
+        const task = getTask(id, sessionParam ? sanitizeSession(sessionParam) : undefined);
+        if (!task) return Response.json({ error: "Task not found" }, { status: 404 });
+        let messages: string[] | undefined;
+        const file = responseFile(task.session, id);
+        if (existsSync(file)) {
+          try { messages = JSON.parse(readFileSync(file, "utf-8")).messages; } catch {}
+        }
+        return Response.json({ ...task, messages });
+      }),
+    },
+
+    "/responses/:id/timeline": {
+      GET: authed((req) => {
+        const session = getSessionParam(req);
+        const id = sanitizeId(req.params.id);
+        const task = getTask(id, session);
+        if (!task) return Response.json({ error: "Task not found" }, { status: 404 });
+        return Response.json({
+          id, session, status: task.status,
+          durationMs: task.duration_ms, model: task.model,
+          steps: task.steps, usage: task.usage, savedUsd: task.saved_usd,
+          filesChanged: task.files_changed, commandsRun: task.commands_run,
+        });
+      }),
+    },
+
+    // --- Usage & savings (budget meter) ---
+
+    "/usage": {
+      GET: authed((req) => {
+        const url = new URL(req.url);
+        const sessionParam = url.searchParams.get("session");
+        const session = sessionParam ? sanitizeSession(sessionParam) : undefined;
+        const since = url.searchParams.get("since") ?? new Date(Date.now() - 86_400_000).toISOString();
+        const agg = usageSince(since, session);
+        return Response.json({ since, session: session ?? "all", ...agg });
+      }),
+    },
+
+    "/usage/window": {
+      GET: authed((req) => {
+        const url = new URL(req.url);
+        const sessionParam = url.searchParams.get("session");
+        const session = sessionParam ? sanitizeSession(sessionParam) : undefined;
+        const now = Date.now();
+        const fiveHour = usageSince(new Date(now - 5 * 3_600_000).toISOString(), session);
+        const week = usageSince(new Date(now - 7 * 86_400_000).toISOString(), session);
+        const threshold = Number(process.env.HAIFLOW_USAGE_ALERT_TOKENS ?? 0) || null;
+        return Response.json({
+          session: session ?? "all",
+          windows: { "5h": fiveHour, "7d": week },
+          alertThresholdTokens: threshold,
+          alert: threshold ? fiveHour.totalTokens >= threshold : false,
+        });
+      }),
+    },
+
     // --- Hooks (no auth — these come from Claude Code itself) ---
 
     "/hooks/session-start": {
@@ -1018,6 +1111,22 @@ const server = Bun.serve({
         const state = readState(session);
         if (state.currentTaskId) {
           saveResponse(session, state.currentTaskId, state.currentPrompt, body.transcript_path, body.last_assistant_message);
+
+          // Durable ledger: mine the transcript for the tool/command/diff timeline + token usage
+          const extract = (body.transcript_path && isAllowedTranscriptPath(body.transcript_path))
+            ? extractFromTranscript(body.transcript_path)
+            : null;
+          recordTaskFinish({
+            id: state.currentTaskId,
+            session,
+            status: "completed",
+            steps: extract?.steps,
+            usage: extract?.usage ?? null,
+            model: extract?.model ?? null,
+            filesChanged: extract?.filesChanged,
+            commandsRun: extract?.commandsRun,
+            savedUsd: extract?.usage ? estimateSavings(extract.usage, extract.model) : null,
+          });
 
           // Pipeline: emit to subscribed topics, propagating chain for circular detection
           const pipeline = readPipeline();

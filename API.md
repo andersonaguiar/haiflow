@@ -147,6 +147,68 @@ View queued prompts for a session.
 
 Clear all queued prompts.
 
+## Task ledger
+
+Every task is recorded in a durable SQLite ledger (`haiflow.db` in `HAIFLOW_DATA_DIR`). On completion, haiflow mines the Claude Code transcript it already parses for the Stop hook and stores the ordered tool calls, commands run, files changed, real diffs, token usage, model, and timing. Durability across reboots depends on `HAIFLOW_DATA_DIR` pointing somewhere persistent (the default `/tmp/haiflow` is wiped on reboot).
+
+### `GET /tasks`
+
+List recorded tasks, newest first.
+
+```bash
+curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  "http://localhost:3333/tasks?session=worker&status=completed&limit=20" | jq .
+```
+
+| Param | Description |
+|-------|-------------|
+| `session` | Filter by session |
+| `status` | `running` \| `completed` \| `timed_out` \| `cancelled` \| `failed` |
+| `source` | Filter by trigger source (`trigger`, `queue`, `pipeline:<topic>`, ...) |
+| `since` / `until` | ISO timestamps bounding `started_at` |
+| `limit` / `offset` | Pagination (limit capped at 500) |
+
+Returns `{ "tasks": [...], "total": N }`. Each task includes `steps[]` (tool name, summary, `isError`, optional `detail`/diff, `filePath`), `usage`, `model`, `duration_ms`, `files_changed`, `commands_run`, and `saved_usd`.
+
+### `GET /tasks/:id`
+
+Get one task by ID (optionally scoped with `?session=`). Includes the saved response `messages` when available.
+
+### `GET /responses/:id/timeline`
+
+The tool/command/diff timeline for a task: `steps`, `durationMs`, `usage`, `model`, `filesChanged`, `commandsRun`.
+
+## Usage & savings
+
+haiflow runs on a flat Claude Code subscription, so tasks cost nothing per-token. These endpoints report measured token consumption and the equivalent API cost a per-token caller would have paid (an estimate from a maintained price table, not a bill).
+
+### `GET /usage`
+
+Aggregate usage and savings since a timestamp (default: last 24h).
+
+```bash
+curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  "http://localhost:3333/usage?session=worker&since=2026-06-09T00:00:00Z" | jq .
+```
+
+Returns `{ since, session, tasks, totalTokens, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, savedUsd }`.
+
+### `GET /usage/window`
+
+Rolling 5-hour and 7-day windows (the rate-limit windows), for the whole account or one `?session=`. If `HAIFLOW_USAGE_ALERT_TOKENS` is set, `alert` is `true` when the 5h window crosses it (alert-only, never throttles).
+
+```json
+{
+  "session": "all",
+  "windows": {
+    "5h": { "tasks": 3, "totalTokens": 41000, "savedUsd": 0.42 },
+    "7d": { "tasks": 88, "totalTokens": 1200000, "savedUsd": 14.10 }
+  },
+  "alertThresholdTokens": null,
+  "alert": false
+}
+```
+
 ## Pipeline
 
 The pipeline system enables event-driven agent chains. When an agent finishes a task, it can emit an event to a topic. Other agents subscribed to that topic automatically receive the output as their next prompt.

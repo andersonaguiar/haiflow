@@ -2,12 +2,13 @@ import React, { useState, useCallback } from "react";
 import { getStatus, getQueue, getResponses, getResponse, clearQueue, clearResponses, stopSession, AuthError } from "../api";
 import { TriggerForm } from "./TriggerForm";
 import { TerminalView } from "./TerminalView";
+import { HistoryView } from "./HistoryView";
 import { Badge, Skeleton, SkeletonLine, EmptyState, Card, StatCard, InboxIcon, MessageIcon, useToast } from "./ui";
 import { usePolling } from "../hooks";
 import { timeAgo } from "../utils";
 import type { Status, QueueItem, ResponseItem } from "../types";
 
-type Tab = "terminal" | "queue" | "responses";
+type Tab = "terminal" | "queue" | "responses" | "history";
 
 function ExpandableResponse({ session, id, completedAt }: { session: string; id: string; completedAt: string }) {
   const [open, setOpen] = useState(false);
@@ -224,6 +225,7 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
           )}
           <TabButton active={tab === "queue"} label="Queue" count={queue.length} onClick={() => setTab("queue")} />
           <TabButton active={tab === "responses"} label="Responses" count={responses.length} onClick={() => setTab("responses")} />
+          <TabButton active={tab === "history"} label="History" onClick={() => setTab("history")} />
           {tab === "queue" && queue.length > 0 && (
             <button onClick={handleClearQueue} className="ml-auto text-xs text-red-400/70 hover:text-red-300 border border-red-400/20 hover:border-red-400/40 rounded px-2 py-0.5 transition-colors">
               Clear Queue
@@ -267,6 +269,8 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
               </Card>
             )
           )}
+
+          {tab === "history" && <HistoryView session={session} />}
         </div>
       </div>
 

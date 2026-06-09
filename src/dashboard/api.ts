@@ -103,6 +103,21 @@ export async function removeSession(session: string) {
   return { status: res.status, data: await res.json() };
 }
 
+export async function getTasks(session: string, limit = 30) {
+  const res = await apiFetch(`/tasks?session=${session}&limit=${limit}`);
+  return res.json();
+}
+
+export async function getTask(session: string, id: string) {
+  const res = await apiFetch(`/tasks/${id}?session=${session}`);
+  return { status: res.status, data: await res.json() };
+}
+
+export async function getUsageWindow(session?: string) {
+  const res = await apiFetch(`/usage/window${session ? `?session=${session}` : ""}`);
+  return res.json();
+}
+
 export async function getPipeline() {
   const res = await apiFetch("/pipeline");
   return res.json();
