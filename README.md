@@ -74,8 +74,10 @@ Installs Bun if missing, checks for `tmux`/`jq`/`claude`/`redis`, installs the `
 ```bash
 export HAIFLOW_API_KEY=your-secret
 haiflow serve                                      # run the server
-haiflow start worker --cwd /path/to/your/project   # in another shell
+haiflow init /path/to/your/project                 # in another shell: wires hooks, starts a session, runs a smoke test
 ```
+
+`haiflow init` is the fastest way to a working setup: it installs the hooks, starts a session, fires a smoke-test prompt, and tells you immediately if the hooks aren't wired (the #1 silent failure). To check health anytime, run `haiflow doctor` or `GET /doctor`. Prefer to do it by hand? Use `haiflow start worker --cwd /path/to/your/project`.
 
 Skip hook setup with `HAIFLOW_SKIP_SETUP=1`. Force npm registry with `HAIFLOW_INSTALL_METHOD=npm`. Inspect the script before piping if you prefer: `curl -fsSL .../install.sh | less`.
 

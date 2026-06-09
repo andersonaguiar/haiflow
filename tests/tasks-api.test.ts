@@ -180,3 +180,19 @@ describe("task cancellation", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("hook doctor", () => {
+  test("reports hooksLinked from the linked session-id", async () => {
+    seedSession("doc-linked", "claude-doc-linked", "t");
+    const res = await api("/doctor?session=doc-linked");
+    expect(res.status).toBe(200);
+    expect(res.data.hooksLinked).toBe(true);
+    expect(res.data.tmuxRunning).toBe(false);
+    expect(res.data.healthy).toBe(true);
+  });
+
+  test("/doctor with no session lists all sessions", async () => {
+    const res = await api("/doctor");
+    expect(Array.isArray(res.data.sessions)).toBe(true);
+  });
+});

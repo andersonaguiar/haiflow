@@ -152,6 +152,16 @@ curl -s http://localhost:3333/status?session=worker | jq .
 
 List all sessions and their status.
 
+## `GET /doctor`
+
+Health check that catches the #1 silent failure: a tmux session whose hooks were never wired (so the Stop hook never fires and the session sits busy forever). The tell is `tmuxRunning: true` with `hooksLinked: false`.
+
+```bash
+curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" "http://localhost:3333/doctor?session=worker" | jq .
+```
+
+With no `session`, returns `{ "sessions": [...] }` for all sessions. Each report has `status`, `tmuxRunning`, `hooksLinked`, `healthy`, and a `note` when something is wrong. The CLI wraps this as `haiflow doctor [session]`, and `haiflow init [dir]` runs hooks + start + a smoke test end to end.
+
 ## `GET /responses`
 
 List all completed response IDs.

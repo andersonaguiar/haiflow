@@ -20,11 +20,16 @@ function flag(name: string): string | undefined {
   return args[idx + 1];
 }
 
+const API_KEY = process.env.HAIFLOW_API_KEY?.trim();
+
 async function api(path: string, method = "GET", body?: object) {
   try {
+    const headers: Record<string, string> = {};
+    if (API_KEY) headers.Authorization = `Bearer ${API_KEY}`;
+    if (body) headers["Content-Type"] = "application/json";
     const res = await fetch(`${BASE}${path}`, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
+      headers,
       body: body ? JSON.stringify(body) : undefined,
     });
     const data = await res.json();
@@ -116,6 +121,76 @@ async function setup() {
   } else {
     console.log(`Hooks already installed in ${settingsPath}`);
   }
+}
+
+async function doctor() {
+  const session = args[1];
+  const data = await api(session ? `/doctor?session=${session}` : "/doctor");
+  const line = (s: any) => {
+    const mark = s.healthy ? "✓" : "✗";
+    console.log(`${mark} ${String(s.session).padEnd(18)} ${String(s.status).padEnd(8)} hooks:${s.hooksLinked ? "linked" : "MISSING"} tmux:${s.tmuxRunning ? "up" : "down"}`);
+    if (s.note) console.log(`    ${s.note}`);
+  };
+  if (data.sessions) {
+    if (data.sessions.length === 0) { console.log("No sessions"); return; }
+    for (const s of data.sessions) line(s);
+  } else {
+    line(data);
+  }
+}
+
+async function init() {
+  const dir = args[1] ? resolve(args[1]) : process.cwd();
+  const session = flag("session") || "default";
+
+  if (!API_KEY) {
+    console.error("HAIFLOW_API_KEY is not set. Set it (e.g. export HAIFLOW_API_KEY=$(openssl rand -hex 32))");
+    console.error("and make sure the running server uses the same value.");
+    process.exit(1);
+  }
+
+  console.log("1. Installing Claude Code hooks...");
+  await setup();
+
+  console.log(`2. Starting session '${session}' in ${dir}...`);
+  const started = await api("/session/start", "POST", { session, cwd: dir });
+  console.log(`   ✓ tmux: ${started.tmux}`);
+
+  // Let the SessionStart hook arrive, then verify the hooks are wired.
+  await new Promise((r) => setTimeout(r, 1500));
+  const health = await api(`/doctor?session=${session}`);
+  if (health.tmuxRunning && !health.hooksLinked) {
+    console.log("   ⚠ Hooks not detected — the SessionStart hook didn't reach the server.");
+    console.log("     Check ~/.claude/settings.json for the haiflow hooks, then restart the session.");
+  } else {
+    console.log("   ✓ Hooks linked");
+  }
+
+  console.log("3. Sending a smoke-test prompt...");
+  const id = `init-smoke-${Date.now()}`;
+  await api("/trigger", "POST", { prompt: "Reply with exactly the word: ready", session, id });
+
+  const deadline = Date.now() + 45_000;
+  let done = false;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const res = await fetch(`${BASE}/responses/${id}?session=${session}`, {
+      headers: API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {},
+    });
+    if (res.status === 200) {
+      const data = await res.json();
+      console.log(`   ✓ Response: ${String(data.messages?.[0] ?? "").slice(0, 80)}`);
+      done = true;
+      break;
+    }
+  }
+  if (!done) {
+    const h = await api(`/doctor?session=${session}`);
+    if (!h.hooksLinked) console.log("   ✗ No response and hooks not linked — run `haiflow setup`, then retry.");
+    else console.log(`   … No response yet. Claude may still be working; check \`haiflow responses ${id} --session ${session}\`.`);
+  }
+
+  console.log(`\nDone. Dashboard: http://localhost:${PORT}/dashboard`);
 }
 
 async function startSession() {
@@ -214,6 +289,8 @@ Commands:
   telegram                       Run the Telegram bot bridge (this process)
   github                         Run the GitHub webhook bridge (this process)
   setup                          Install Claude Code hooks
+  init [dir] [--session name]    One-shot onboarding: hooks + session + smoke test
+  doctor [session]               Report hook/session health (catches unwired hooks)
   start <session> --cwd <path>   Start a Claude session
   stop [session]                 Stop a Claude session
   trigger <prompt>               Send a prompt to Claude
@@ -256,6 +333,12 @@ switch (command) {
     break;
   case "setup":
     await setup();
+    break;
+  case "init":
+    await init();
+    break;
+  case "doctor":
+    await doctor();
     break;
   case "start":
     await startSession();

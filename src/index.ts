@@ -934,6 +934,37 @@ const server = Bun.serve({
       GET: authed((req) => Response.json(readState(getSessionParam(req)))),
     },
 
+    // Hook doctor: the #1 silent failure is a session that is busy forever
+    // because the Stop hook never fires. The tell is a running tmux with no
+    // linked Claude session-id — the SessionStart hook never reached us, so the
+    // hooks aren't wired. Reports per-session (or all sessions) health.
+    "/doctor": {
+      GET: authed((req) => {
+        const url = new URL(req.url);
+        const param = url.searchParams.get("session");
+        const check = (session: string) => {
+          const state = readState(session);
+          const tmuxRunning = isTmuxRunning(session);
+          const hooksLinked = !!getSessionId(session);
+          return {
+            session,
+            status: state.status,
+            since: state.since,
+            cwd: state.cwd,
+            tmuxRunning,
+            hooksLinked,
+            healthy: !tmuxRunning || hooksLinked,
+            note: tmuxRunning && !hooksLinked
+              ? "tmux is running but no Claude session-id is linked — the SessionStart hook never fired. Run `haiflow setup` and restart the session."
+              : undefined,
+            queueLength: state.queueLength,
+          };
+        };
+        if (param) return Response.json(check(sanitizeSession(param)));
+        return Response.json({ sessions: listSessions().map((s) => check(s.session)) });
+      }),
+    },
+
     "/trigger": {
       POST: authed(async (req) => {
         const body = await req.json();
