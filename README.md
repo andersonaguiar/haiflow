@@ -165,6 +165,10 @@ cp .env.example .env
 | `HAIFLOW_GUARDRAILS` | `true` | Installs `~/.claude/skills/haiflow-guardrails/SKILL.md` on server boot and injects `/haiflow-guardrails` into each new tmux session. The skill instructs Claude to refuse paths outside cwd, refuse to read secrets, and refuse network exfiltration. |
 | `REDIS_URL` | `redis://localhost:6379` | **Required.** Redis URL for event persistence and delivery tracking |
 | `N8N_API_KEY` | — | n8n API key for workflow integration |
+| `HAIFLOW_USAGE_ALERT_TOKENS` | — | When set, `GET /usage/window` flags `alert: true` once the rolling 5h token total crosses it (alert-only, never throttles) |
+| `HAIFLOW_TASK_TIMEOUT_SEC` | `0` | Optional hard per-task timeout. `0` disables it. The watchdog flags tasks that exceed it |
+| `HAIFLOW_WAITING_GRACE_SEC` | `120` | How long a session flagged `waiting` by Claude's Notification hook may stay blocked before the watchdog acts |
+| `HAIFLOW_WATCHDOG_RECOVER` | `false` | When `true`, the watchdog auto-recovers a wedged session (Escape, mark `timed_out`, drain). Default alert-only |
 
 ## Authentication
 
@@ -225,7 +229,7 @@ Haiflow outputs structured JSON logs to stdout/stderr for all key events:
 {"ts":"2026-03-18T02:35:10Z","level":"warn","event":"auth_rejected","path":"/trigger"}
 ```
 
-Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_failed`, `queue_drained`, `queue_cleared`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `auth_rejected`, `redis_connected`, `redis_unavailable`, `event_published`, `event_published_direct`, `pipeline_dispatched`, `pipeline_queued`, `pipeline_subscriber_offline`, `pipeline_circular_skipped`, `pipeline_prompt_too_large`, `pipeline_webhook_sent`, `pipeline_webhook_failed`, `publish_unknown_topic`, `publish_unauthorized`.
+Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_failed`, `queue_drained`, `queue_cleared`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `hook_notification`, `interrupt_sent`, `watchdog_triggered`, `watchdog_recovered`, `auth_rejected`, `redis_connected`, `redis_unavailable`, `event_published`, `event_published_direct`, `pipeline_dispatched`, `pipeline_queued`, `pipeline_subscriber_offline`, `pipeline_circular_skipped`, `pipeline_prompt_too_large`, `pipeline_webhook_sent`, `pipeline_webhook_failed`, `publish_unknown_topic`, `publish_unauthorized`.
 
 ## How it works
 

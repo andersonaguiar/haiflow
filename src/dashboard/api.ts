@@ -95,6 +95,14 @@ export async function stopSession(session: string) {
   return { status: res.status, data: await res.json() };
 }
 
+export async function interruptSession(session: string, mode: "escape" | "ctrl-c" = "escape", prompt?: string) {
+  const res = await apiFetch("/interrupt", {
+    method: "POST",
+    body: JSON.stringify({ session, mode, prompt }),
+  });
+  return { status: res.status, data: await res.json() };
+}
+
 export async function removeSession(session: string) {
   const res = await apiFetch("/session/remove", {
     method: "POST",

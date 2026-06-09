@@ -37,6 +37,27 @@ curl -X POST http://localhost:3333/session/remove \
   -d '{"session": "worker"}'
 ```
 
+## `POST /interrupt`
+
+Send a control key into a running session's TUI, optionally followed by a steering prompt. Use it to unstick a session wedged on a permission prompt, or to redirect a running agent.
+
+```bash
+curl -X POST http://localhost:3333/interrupt \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "worker", "mode": "escape", "prompt": "stop and run the tests instead"}'
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session` | string | No | Session name (default: `"default"`) |
+| `mode` | string | No | `escape` (default, cancels the current generation/tool without exiting) or `ctrl-c` (harsher) |
+| `prompt` | string | No | A steering prompt typed in after the interrupt settles. Passes the same structural checks as `/trigger` |
+
+Returns `{ "interrupted": true, "session": "worker", "mode": "escape", "steered": true }`. `404` if the session is not running.
+
+> **Watchdog & `waiting`.** Claude Code's `Notification` hook tells haiflow when a session is blocked needing input mid-task; that session is flagged `waiting` (visible on `GET /status`). A background watchdog also flags tasks past `HAIFLOW_TASK_TIMEOUT_SEC`. By default the watchdog only logs a `watchdog_triggered` warning; set `HAIFLOW_WATCHDOG_RECOVER=true` to have it auto-recover (Escape, mark the task `timed_out`, drain the queue). Run `haiflow setup` again after upgrading to register the new `Notification` hook.
+
 ## `POST /trigger`
 
 Send a prompt to Claude. If Claude is busy, the prompt is auto-queued and sent when idle.

@@ -21,6 +21,22 @@ const ALLOW_REQUEST_CWD = (process.env.HAIFLOW_ALLOW_REQUEST_CWD ?? "true").toLo
 const ENABLE_GUARDRAILS = (process.env.HAIFLOW_GUARDRAILS ?? "true").toLowerCase() !== "false";
 const GUARDRAIL_SKILL_NAME = "haiflow-guardrails";
 
+// Watchdog: a session can otherwise sit busy forever if Claude wedges on a
+// permission prompt the model can't auto-answer — the Stop hook never fires,
+// so the queue never drains. TASK_TIMEOUT_SEC is an optional hard ceiling
+// (0 = disabled). WAITING_GRACE_MS is how long a session flagged "waiting" by
+// the Notification hook may stay blocked before the watchdog acts. Recovery
+// (sending Escape + draining) defaults OFF — alert-only — because the safe
+// default is to never auto-kill a task that might just be slow.
+const TASK_TIMEOUT_SEC = Number(process.env.HAIFLOW_TASK_TIMEOUT_SEC ?? 0) || 0;
+const WAITING_GRACE_MS = (Number(process.env.HAIFLOW_WAITING_GRACE_SEC ?? 120) || 120) * 1000;
+const WATCHDOG_RECOVER = (process.env.HAIFLOW_WATCHDOG_RECOVER ?? "false").toLowerCase() === "true";
+const WATCHDOG_INTERVAL_MS = 15_000;
+
+function taskDeadline(): string | undefined {
+  return TASK_TIMEOUT_SEC > 0 ? new Date(Date.now() + TASK_TIMEOUT_SEC * 1000).toISOString() : undefined;
+}
+
 // Max prompt/message size: 512KB — safely under Claude Code's ~150K usable token budget
 // and under tmux/OS transport limits. The file-based fallback in sendToTmux handles delivery.
 const MAX_PROMPT_SIZE = 512_000;
@@ -101,6 +117,13 @@ interface State {
   currentTaskId?: string;
   currentChain?: string[];
   queueLength: number;
+  // Watchdog fields. `waiting` is set by the Notification hook when Claude is
+  // blocked needing input mid-task; `deadlineAt` is the optional hard timeout.
+  waiting?: boolean;
+  waitingMessage?: string;
+  waitingSince?: string;
+  deadlineAt?: string;
+  transcriptPath?: string;
 }
 
 interface QueueItem {
@@ -237,6 +260,7 @@ async function deliverToSubscribers(
       currentPrompt: prompt,
       currentTaskId: taskId,
       currentChain: chain,
+      deadlineAt: taskDeadline(),
     });
     recordTaskStart({ id: taskId, session: subscriberSession, prompt, source: `pipeline:${topic}`, chain });
     sendToTmux(subscriberSession, prompt);
@@ -465,6 +489,17 @@ function isTmuxRunning(session: string): boolean {
   return result.exitCode === 0;
 }
 
+// Send a control key into the session's TUI. Escape cancels Claude's current
+// generation/tool use and returns control without exiting; Ctrl-C is harsher
+// and can quit the CLI, so Escape is the default. Shared by POST /interrupt,
+// the watchdog, and task cancellation.
+function sendInterrupt(session: string, mode: "escape" | "ctrl-c" = "escape"): boolean {
+  if (!isTmuxRunning(session)) return false;
+  const target = tmuxName(session);
+  const key = mode === "ctrl-c" ? "C-c" : "Escape";
+  return Bun.spawnSync(["tmux", "send-keys", "-t", target, key]).exitCode === 0;
+}
+
 function saveResponse(session: string, taskId: string, prompt?: string, transcriptPath?: string, lastMessage?: string) {
   if (!taskId) return;
   const file = responseFile(session, taskId);
@@ -513,6 +548,7 @@ function drainQueue(session: string) {
     currentPrompt: next.prompt,
     currentTaskId: next.id,
     currentChain: next.chain,
+    deadlineAt: taskDeadline(),
   });
   recordTaskStart({ id: next.id, session, prompt: next.prompt, source: next.source ?? "queue", chain: next.chain });
 
@@ -720,6 +756,7 @@ const server = Bun.serve({
           since: new Date().toISOString(),
           currentPrompt: prompt,
           currentTaskId: id,
+          deadlineAt: taskDeadline(),
         });
         recordTaskStart({ id, session, prompt, source: source ?? "trigger" });
 
@@ -1094,6 +1131,11 @@ const server = Bun.serve({
           since: new Date().toISOString(),
           currentPrompt: body.prompt,
           currentTaskId: state.currentTaskId,
+          // A new prompt is being processed — any prior "waiting" block is over.
+          waiting: false,
+          waitingMessage: undefined,
+          waitingSince: undefined,
+          transcriptPath: body.transcript_path,
         });
 
         return Response.json({ ok: true });
@@ -1142,7 +1184,10 @@ const server = Bun.serve({
           }
         }
 
-        writeState(session, { status: "idle", since: new Date().toISOString() });
+        writeState(session, {
+          status: "idle", since: new Date().toISOString(),
+          waiting: false, waitingMessage: undefined, waitingSince: undefined, deadlineAt: undefined,
+        });
         drainQueue(session);
         log("info", "hook_stop", { session, taskId: state.currentTaskId });
 
@@ -1165,6 +1210,32 @@ const server = Bun.serve({
 
         writeState(session, { status: "offline", since: new Date().toISOString() });
         log("info", "hook_session_end", { session, reason });
+        return Response.json({ ok: true });
+      },
+    },
+
+    "/hooks/notification": {
+      POST: async (req) => {
+        const err = requireLocalhost(req);
+        if (err) return err;
+        const body = await req.json();
+        const session = findSessionByClaudeId(body.session_id);
+        if (!session) return Response.json({ ok: true });
+
+        // Only treat a notification as a wedge signal while the session is
+        // mid-task. Claude also fires Notification when idle and waiting for the
+        // next prompt — for haiflow that's the normal idle state, not a wedge.
+        const state = readState(session);
+        if (state.status === "busy") {
+          const message = typeof body.message === "string" ? body.message.slice(0, 500) : undefined;
+          writeState(session, {
+            waiting: true,
+            waitingMessage: message,
+            waitingSince: new Date().toISOString(),
+            transcriptPath: body.transcript_path,
+          });
+          log("warn", "hook_notification", { session, message });
+        }
         return Response.json({ ok: true });
       },
     },
@@ -1233,6 +1304,45 @@ const server = Bun.serve({
         }
         log("info", "session_removed", { session });
         return Response.json({ removed: true, session });
+      }),
+    },
+
+    // Interrupt a running session: send Escape (default) or Ctrl-C into its TUI,
+    // optionally followed by a steering prompt. Use this to unstick a session
+    // wedged on a permission prompt, or to redirect a running agent.
+    "/interrupt": {
+      POST: authed(async (req) => {
+        const body = await req.json();
+        const session = sanitizeSession((body.session as string) || "default");
+        const mode = body.mode === "ctrl-c" ? "ctrl-c" : "escape";
+
+        if (!isTmuxRunning(session)) {
+          return Response.json({ error: `Session '${session}' is not running` }, { status: 404 });
+        }
+
+        const sent = sendInterrupt(session, mode);
+        if (!sent) {
+          return Response.json({ error: "Failed to send interrupt" }, { status: 500 });
+        }
+        // We just acted on the wedge — clear the waiting flag.
+        writeState(session, { waiting: false, waitingMessage: undefined, waitingSince: undefined });
+
+        let steered = false;
+        if (typeof body.prompt === "string" && body.prompt.length > 0) {
+          const prompt = body.prompt as string;
+          if (prompt.length > MAX_PROMPT_SIZE) {
+            return Response.json({ error: `prompt exceeds ${MAX_PROMPT_SIZE} character limit` }, { status: 413 });
+          }
+          const validation = validateStructural(prompt);
+          if (!validation.ok) {
+            return Response.json({ error: `Prompt rejected: ${validation.reason}` }, { status: 400 });
+          }
+          await Bun.sleep(250); // let the interrupt settle before typing
+          steered = sendToTmux(session, prompt);
+        }
+
+        log("info", "interrupt_sent", { session, mode, steered });
+        return Response.json({ interrupted: true, session, mode, steered });
       }),
     },
 
@@ -1407,3 +1517,41 @@ setInterval(async () => {
   const pruned = await eventBus.prune(7);
   if (pruned > 0) log("info", "events_pruned", { count: pruned });
 }, 86_400_000);
+
+// Watchdog: catch sessions wedged on a permission prompt (flagged "waiting" by
+// the Notification hook) or past their hard deadline, so a stuck session can't
+// silently sit busy forever and starve its queue. Recovery (Escape + drain) is
+// opt-in via HAIFLOW_WATCHDOG_RECOVER; by default this only alerts in the logs.
+setInterval(() => {
+  for (const { session, status } of listSessions()) {
+    if (status !== "busy") continue;
+    const state = readState(session);
+    const now = Date.now();
+    const overDeadline = state.deadlineAt ? Date.parse(state.deadlineAt) < now : false;
+    const waitingTooLong = state.waiting && state.waitingSince
+      ? now - Date.parse(state.waitingSince) > WAITING_GRACE_MS
+      : false;
+    if (!overDeadline && !waitingTooLong) continue;
+
+    const reason = overDeadline ? "timeout" : "waiting";
+    log("warn", "watchdog_triggered", {
+      session, reason, taskId: state.currentTaskId,
+      waitingMessage: state.waitingMessage, recover: WATCHDOG_RECOVER,
+    });
+
+    if (!WATCHDOG_RECOVER || !isTmuxRunning(session)) continue;
+
+    sendInterrupt(session, "escape");
+    if (state.currentTaskId) {
+      saveResponse(session, state.currentTaskId, state.currentPrompt, undefined,
+        `[haiflow] task recovered by watchdog (${reason})`);
+      recordTaskFinish({ id: state.currentTaskId, session, status: "timed_out", error: `watchdog:${reason}` });
+    }
+    writeState(session, {
+      status: "idle", since: new Date().toISOString(),
+      waiting: false, waitingMessage: undefined, waitingSince: undefined, deadlineAt: undefined,
+    });
+    drainQueue(session);
+    log("info", "watchdog_recovered", { session, reason, taskId: state.currentTaskId });
+  }
+}, WATCHDOG_INTERVAL_MS);

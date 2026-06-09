@@ -75,6 +75,7 @@ async function setup() {
     UserPromptSubmit: `${HOOKS_DIR}/prompt.sh`,
     Stop: `${HOOKS_DIR}/stop.sh`,
     SessionEnd: `${HOOKS_DIR}/session-end.sh`,
+    Notification: `${HOOKS_DIR}/notification.sh`,
   };
 
   let installed = 0;

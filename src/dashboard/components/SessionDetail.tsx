@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from "react";
-import { getStatus, getQueue, getResponses, getResponse, clearQueue, clearResponses, stopSession, AuthError } from "../api";
+import { getStatus, getQueue, getResponses, getResponse, clearQueue, clearResponses, stopSession, interruptSession, AuthError } from "../api";
 import { TriggerForm } from "./TriggerForm";
 import { TerminalView } from "./TerminalView";
 import { HistoryView } from "./HistoryView";
@@ -173,6 +173,13 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
     fetchAll();
   };
 
+  const handleInterrupt = async () => {
+    const res = await interruptSession(session);
+    if (res.status === 200) toast("Interrupt sent", "success");
+    else toast(res.data?.error || "Interrupt failed", "error");
+    fetchAll();
+  };
+
   if (!status) return <DetailSkeleton />;
 
   return (
@@ -196,6 +203,22 @@ export function SessionDetail({ session, onRefresh }: { session: string; onRefre
           </button>
         )}
       </div>
+
+      {/* Waiting / wedged banner */}
+      {status.waiting && (
+        <div className="flex items-center gap-3 bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 animate-[fadeIn_200ms_ease-out]">
+          <span className="text-amber-400 text-sm shrink-0">⏳ Needs input</span>
+          <span className="text-xs text-amber-200/80 truncate flex-1" title={status.waitingMessage}>
+            {status.waitingMessage || "Claude is blocked waiting for input"}
+          </span>
+          <button
+            onClick={handleInterrupt}
+            className="text-xs text-amber-300 hover:text-amber-200 border border-amber-400/40 hover:border-amber-400/60 rounded px-2 py-1 transition-colors shrink-0"
+          >
+            Interrupt
+          </button>
+        </div>
+      )}
 
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-3">

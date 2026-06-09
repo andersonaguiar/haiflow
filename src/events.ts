@@ -32,6 +32,8 @@ export interface DeliveryRecord {
 export interface WebhookRetry extends DeliveryRecord {
   topic: string;
   message: string;
+  sourceSession: string;
+  taskId: string;
 }
 
 const EVENT_TTL = 7 * 86_400; // 7 days in seconds
@@ -277,6 +279,8 @@ export class EventBus {
         ...delivery,
         topic: event.topic,
         message: event.message,
+        sourceSession: event.sourceSession,
+        taskId: event.taskId,
       });
     }
     return retries;

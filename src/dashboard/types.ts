@@ -12,6 +12,9 @@ export interface Status {
   currentPrompt?: string;
   currentTaskId?: string;
   queueLength: number;
+  waiting?: boolean;
+  waitingMessage?: string;
+  waitingSince?: string;
 }
 
 export interface QueueItem {
