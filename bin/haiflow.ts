@@ -8,6 +8,7 @@ const BASE = `http://localhost:${PORT}`;
 const PACKAGE_ROOT = dirname(import.meta.dir);
 const HOOKS_DIR = resolve(PACKAGE_ROOT, "hooks");
 const SERVER_ENTRY = resolve(PACKAGE_ROOT, "src/index.ts");
+const TELEGRAM_ENTRY = resolve(PACKAGE_ROOT, "src/telegram-bot.ts");
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -48,6 +49,15 @@ async function serve() {
     process.exit(1);
   }
   await import(SERVER_ENTRY);
+}
+
+async function telegram() {
+  if (!existsSync(TELEGRAM_ENTRY)) {
+    console.error(`Telegram bot entry not found at ${TELEGRAM_ENTRY}`);
+    console.error(`The haiflow package may be incomplete — try reinstalling.`);
+    process.exit(1);
+  }
+  await import(TELEGRAM_ENTRY);
 }
 
 async function setup() {
@@ -190,6 +200,7 @@ Usage: haiflow <command> [options]
 
 Commands:
   serve                          Run the haiflow server (this process)
+  telegram                       Run the Telegram bot bridge (this process)
   setup                          Install Claude Code hooks
   start <session> --cwd <path>   Start a Claude session
   stop [session]                 Stop a Claude session
@@ -205,7 +216,11 @@ Options:
   --source <name>    Source label for trigger
 
 Environment:
-  PORT               Server port (default: 3333)
+  PORT                        Server port (default: 3333)
+  HAIFLOW_API_KEY             Bearer token (required by the telegram bot)
+  TELEGRAM_BOT_TOKEN          Bot token from @BotFather (required by telegram)
+  TELEGRAM_SESSION            Session the bot drives (default: "default")
+  TELEGRAM_ALLOWED_CHAT_IDS   Comma-separated chat allowlist (recommended)
 
 Examples:
   haiflow setup
@@ -213,12 +228,16 @@ Examples:
   haiflow trigger "explain this codebase"
   haiflow trigger "/daily-update" --session worker --id daily-001
   haiflow status worker
-  haiflow sessions`);
+  haiflow sessions
+  haiflow telegram`);
 }
 
 switch (command) {
   case "serve":
     await serve();
+    break;
+  case "telegram":
+    await telegram();
     break;
   case "setup":
     await setup();
