@@ -33,6 +33,11 @@ const WAITING_GRACE_MS = (Number(process.env.HAIFLOW_WAITING_GRACE_SEC ?? 120) |
 const WATCHDOG_RECOVER = (process.env.HAIFLOW_WATCHDOG_RECOVER ?? "false").toLowerCase() === "true";
 const WATCHDOG_INTERVAL_MS = 15_000;
 
+// Map-reduce: how many items one /map call may fan out, and how long a run may
+// wait for stragglers before the reducer fires with whatever has come back.
+const MAP_MAX_ITEMS = Number(process.env.HAIFLOW_MAP_MAX_ITEMS ?? 200) || 200;
+const MAP_TIMEOUT_MS = (Number(process.env.HAIFLOW_MAP_TIMEOUT_SEC ?? 1800) || 1800) * 1000;
+
 function taskDeadline(): string | undefined {
   return TASK_TIMEOUT_SEC > 0 ? new Date(Date.now() + TASK_TIMEOUT_SEC * 1000).toISOString() : undefined;
 }
@@ -161,12 +166,20 @@ interface TopicConfig {
   webhooks?: WebhookSubscriber[];
 }
 
+interface PoolConfig {
+  // Member session names. The pool's max concurrency is its member count;
+  // each member is its own tmux session (pin per-member cwds in /session/start).
+  members: string[];
+  description?: string;
+}
+
 interface PipelineConfig {
   topics: Record<string, TopicConfig>;
   emitters: Record<string, string[]>;
+  pools: Record<string, PoolConfig>;
 }
 
-const EMPTY_PIPELINE: PipelineConfig = { topics: {}, emitters: {} };
+const EMPTY_PIPELINE: PipelineConfig = { topics: {}, emitters: {}, pools: {} };
 
 let cachedPipeline: PipelineConfig | null = null;
 let cachedPipelineMtime = 0;
@@ -185,7 +198,7 @@ function readPipeline(): PipelineConfig {
   try {
     const raw = readFileSync(file, "utf-8");
     const config = JSON.parse(raw);
-    cachedPipeline = { topics: config.topics ?? {}, emitters: config.emitters ?? {} };
+    cachedPipeline = { topics: config.topics ?? {}, emitters: config.emitters ?? {}, pools: config.pools ?? {} };
     cachedPipelineMtime = stat.mtimeMs;
     cachedPipelineSize = stat.size;
     return cachedPipeline;
@@ -763,6 +776,121 @@ function listSessions(): { session: string; status: Status; tmux: string }[] {
     });
 }
 
+// --- Worker pools & map-reduce ---
+//
+// A pool is a set of member sessions that share work. POST /pool/:name/trigger
+// load-balances one prompt across idle members; POST /map fans a list of items
+// across the pool in parallel and fires a reducer once every item comes back —
+// the fan-in / JOIN. Run state is kept in-process (runs are short-lived); it
+// does not survive a server restart, which is fine for a batch job.
+
+interface MapRun {
+  runId: string;
+  pool: string;
+  total: number;
+  collected: Record<number, string>;
+  reduce?: { session: string; promptTemplate: string };
+  reduceTaskId?: string;
+  source?: string;
+  createdAt: number;
+  reduced: boolean;
+}
+
+const mapRuns = new Map<string, MapRun>();
+const taskToMap = new Map<string, { runId: string; index: number }>();
+
+// Send to a session if idle, else queue it. Used by pool dispatch and the
+// reducer. Returns where the work landed.
+function dispatchOrQueue(
+  session: string,
+  prompt: string,
+  opts: { id: string; source?: string; chain?: string[]; priority?: number }
+): "sent" | "queued" | "queued_offline" {
+  const state = readState(session);
+
+  if (state.status === "idle") {
+    writeState(session, {
+      status: "busy", since: new Date().toISOString(),
+      currentPrompt: prompt, currentTaskId: opts.id, currentChain: opts.chain,
+      deadlineAt: taskDeadline(),
+    });
+    recordTaskStart({ id: opts.id, session, prompt, source: opts.source, chain: opts.chain });
+    sendToTmux(session, prompt);
+    return "sent";
+  }
+
+  const queue = readQueue(session);
+  queue.push({ id: opts.id, prompt, addedAt: new Date().toISOString(), source: opts.source, chain: opts.chain, priority: opts.priority });
+  writeQueue(session, queue);
+  return state.status === "offline" ? "queued_offline" : "queued";
+}
+
+// Pick the member to hand the next item to: an idle one if any, otherwise the
+// one with the shortest queue (least loaded). Synchronous, so within one event
+// loop turn two dispatches can't claim the same idle member.
+function pickPoolMember(members: string[]): { session: string; idle: boolean } | null {
+  let leastLoaded: { session: string; load: number } | null = null;
+  for (const m of members) {
+    const state = readState(m);
+    if (state.status === "idle") return { session: m, idle: true };
+    if (state.status === "offline") continue;
+    const load = state.queueLength;
+    if (!leastLoaded || load < leastLoaded.load) leastLoaded = { session: m, load };
+  }
+  if (leastLoaded) return { session: leastLoaded.session, idle: false };
+  // Everyone offline — fall back to the first member so the work queues somewhere.
+  return members.length > 0 ? { session: members[0]!, idle: false } : null;
+}
+
+function formatMapResults(run: MapRun): string {
+  const parts: string[] = [];
+  for (let i = 0; i < run.total; i++) {
+    parts.push(`### Result ${i + 1} of ${run.total}\n${run.collected[i] ?? "(no output)"}`);
+  }
+  return parts.join("\n\n");
+}
+
+// Called from the Stop hook: if the finished task belongs to a map run, record
+// its output and fire the reducer once every item is in (or on timeout).
+function collectMapResult(taskId: string, output: string) {
+  const slot = taskToMap.get(taskId);
+  if (!slot) return;
+  taskToMap.delete(taskId);
+  const run = mapRuns.get(slot.runId);
+  if (!run || run.reduced) return;
+
+  run.collected[slot.index] = output;
+  const done = Object.keys(run.collected).length;
+  log("info", "map_progress", { runId: run.runId, done, total: run.total });
+  if (done >= run.total) finishMapRun(run, false);
+}
+
+function finishMapRun(run: MapRun, partial: boolean) {
+  if (run.reduced) return;
+  run.reduced = true;
+  log(partial ? "warn" : "info", partial ? "map_reduced_partial" : "map_reduced", {
+    runId: run.runId, collected: Object.keys(run.collected).length, total: run.total,
+  });
+
+  if (!run.reduce) return;
+  const results = formatMapResults(run);
+  const prompt = renderTemplate(run.reduce.promptTemplate, {
+    results, total: String(run.total), pool: run.pool, runId: run.runId,
+  });
+  if (prompt.length > MAX_PROMPT_SIZE) {
+    log("warn", "map_reduce_prompt_too_large", { runId: run.runId, size: prompt.length });
+    return;
+  }
+  const check = validateStructural(prompt);
+  if (!check.ok) {
+    log("warn", "map_reduce_rejected", { runId: run.runId, reason: check.reason });
+    return;
+  }
+  const reduceTaskId = generateId();
+  run.reduceTaskId = reduceTaskId;
+  dispatchOrQueue(run.reduce.session, prompt, { id: reduceTaskId, source: `map:${run.runId}` });
+}
+
 const server = Bun.serve({
   port: PORT,
   routes: {
@@ -892,6 +1020,95 @@ const server = Bun.serve({
         writeQueue(session, queue);
         log("info", "queue_item_reprioritized", { session, taskId: id, priority });
         return Response.json({ session, id, priority });
+      }),
+    },
+
+    // --- Worker pools & map-reduce ---
+
+    // Load-balance one prompt across a pool's members (idle first, else the
+    // least-loaded member's queue).
+    "/pool/:name/trigger": {
+      POST: authed(async (req) => {
+        const name = sanitizeSession(req.params.name);
+        const body = await req.json();
+        const prompt = body.prompt as string;
+        if (!prompt) return Response.json({ error: "prompt is required" }, { status: 400 });
+        if (prompt.length > MAX_PROMPT_SIZE) return Response.json({ error: `prompt exceeds ${MAX_PROMPT_SIZE} character limit` }, { status: 413 });
+        const check = validateStructural(prompt);
+        if (!check.ok) return Response.json({ error: `Prompt rejected: ${check.reason}` }, { status: 400 });
+
+        const pool = readPipeline().pools[name];
+        if (!pool || !pool.members?.length) return Response.json({ error: `Unknown pool '${name}'` }, { status: 404 });
+
+        const member = pickPoolMember(pool.members);
+        if (!member) return Response.json({ error: "Pool has no members" }, { status: 503 });
+
+        const id = body.id ? sanitizeId(body.id as string) : generateId();
+        const where = dispatchOrQueue(member.session, prompt, {
+          id, source: (body.source as string) ?? `pool:${name}`,
+          priority: Number(body.priority) || undefined,
+        });
+        log("info", "pool_dispatched", { pool: name, member: member.session, taskId: id, where });
+        return Response.json({ pool: name, member: member.session, id, where });
+      }),
+    },
+
+    // Fan a list of items across a pool in parallel, then fire a reducer once
+    // every item has come back (the fan-in / JOIN).
+    "/map": {
+      POST: authed(async (req) => {
+        const body = await req.json();
+        const items = body.items;
+        const poolName = sanitizeSession((body.pool as string) ?? "");
+        const mapTemplate = body.mapTemplate as string;
+
+        if (!Array.isArray(items) || items.length === 0) return Response.json({ error: "items (non-empty array) is required" }, { status: 400 });
+        if (items.length > MAP_MAX_ITEMS) return Response.json({ error: `items exceeds ${MAP_MAX_ITEMS} limit` }, { status: 413 });
+        if (!mapTemplate) return Response.json({ error: "mapTemplate is required" }, { status: 400 });
+
+        const pool = readPipeline().pools[poolName];
+        if (!pool || !pool.members?.length) return Response.json({ error: `Unknown pool '${poolName}'` }, { status: 404 });
+
+        const reduce = body.reduce?.session && body.reduce?.promptTemplate
+          ? { session: sanitizeSession(body.reduce.session as string), promptTemplate: String(body.reduce.promptTemplate) }
+          : undefined;
+
+        const runId = `map_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const run: MapRun = { runId, pool: poolName, total: items.length, collected: {}, reduce, source: body.source, createdAt: Date.now(), reduced: false };
+        mapRuns.set(runId, run);
+
+        const dispatched: unknown[] = [];
+        for (let i = 0; i < items.length; i++) {
+          const itemStr = typeof items[i] === "string" ? items[i] : JSON.stringify(items[i]);
+          const prompt = renderTemplate(mapTemplate, { item: itemStr, index: String(i), total: String(items.length), runId });
+          if (prompt.length > MAX_PROMPT_SIZE) { run.collected[i] = "(skipped: prompt too large)"; continue; }
+          const v = validateStructural(prompt);
+          if (!v.ok) { run.collected[i] = `(skipped: ${v.reason})`; continue; }
+
+          const taskId = generateId();
+          taskToMap.set(taskId, { runId, index: i });
+          const member = pickPoolMember(pool.members)!;
+          const where = dispatchOrQueue(member.session, prompt, { id: taskId, source: `map:${runId}` });
+          dispatched.push({ index: i, taskId, member: member.session, where });
+        }
+
+        // Any items skipped synchronously may already complete the run.
+        if (Object.keys(run.collected).length >= run.total) finishMapRun(run, false);
+
+        log("info", "map_started", { runId, pool: poolName, total: items.length, reduce: !!reduce });
+        return Response.json({ runId, pool: poolName, total: items.length, reduce: !!reduce, dispatched });
+      }),
+    },
+
+    "/map/:runId": {
+      GET: authed((req) => {
+        const run = mapRuns.get(req.params.runId);
+        if (!run) return Response.json({ error: "Map run not found" }, { status: 404 });
+        return Response.json({
+          runId: run.runId, pool: run.pool, total: run.total,
+          collected: Object.keys(run.collected).length, reduced: run.reduced,
+          reduceTaskId: run.reduceTaskId,
+        });
       }),
     },
 
@@ -1328,6 +1545,10 @@ const server = Bun.serve({
               chain: state.currentChain,
             });
           }
+
+          // Map-reduce: if this task was a map shard, collect its output and
+          // fire the reducer once the whole run is in.
+          collectMapResult(state.currentTaskId, responseText);
         }
 
         writeState(session, {
@@ -1708,5 +1929,12 @@ setInterval(() => {
     });
     drainQueue(session);
     log("info", "watchdog_recovered", { session, reason, taskId: state.currentTaskId });
+  }
+
+  // Time out stuck map runs (a shard never returned) and reap old finished ones.
+  const nowMs = Date.now();
+  for (const [id, run] of mapRuns) {
+    if (!run.reduced && nowMs - run.createdAt > MAP_TIMEOUT_MS) finishMapRun(run, true);
+    else if (run.reduced && nowMs - run.createdAt > MAP_TIMEOUT_MS + 3_600_000) mapRuns.delete(id);
   }
 }, WATCHDOG_INTERVAL_MS);

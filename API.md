@@ -261,6 +261,58 @@ Rolling 5-hour and 7-day windows (the rate-limit windows), for the whole account
 }
 ```
 
+## Worker pools & map-reduce
+
+A pool is a set of member sessions that share work. Define pools in `pipeline.json`:
+
+```json
+{
+  "pools": {
+    "reviewers": { "members": ["reviewer-1", "reviewer-2", "reviewer-3"] }
+  }
+}
+```
+
+Each member is its own tmux session (start them with their own cwd). A pool's max concurrency is its member count.
+
+### `POST /pool/:name/trigger`
+
+Load-balance one prompt across the pool: it goes to an idle member, or the least-loaded member's queue.
+
+```bash
+curl -X POST -H "Authorization: Bearer $HAIFLOW_API_KEY" -H "Content-Type: application/json" \
+  -d '{"prompt": "review the latest diff"}' \
+  http://localhost:3333/pool/reviewers/trigger
+```
+
+Returns `{ "pool": "reviewers", "member": "reviewer-2", "id": "task_...", "where": "sent" }`.
+
+### `POST /map`
+
+Fan a list of items across a pool in parallel, then fire a reducer once every item has come back. This is the fan-in / JOIN: N parallel agents under one flat subscription, converged into one result.
+
+```bash
+curl -X POST -H "Authorization: Bearer $HAIFLOW_API_KEY" -H "Content-Type: application/json" -d '{
+  "items": ["src/a.ts", "src/b.ts", "src/c.ts"],
+  "pool": "reviewers",
+  "mapTemplate": "Review {{item}} and list any bugs.",
+  "reduce": { "session": "lead", "promptTemplate": "Merge these reviews into one report:\n{{results}}" }
+}' http://localhost:3333/map
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `items` | array | **Yes** | Items to map over (strings, or objects stringified into `{{item}}`). Capped at `HAIFLOW_MAP_MAX_ITEMS` (200) |
+| `pool` | string | **Yes** | Pool name from `pipeline.json` |
+| `mapTemplate` | string | **Yes** | Prompt per item. Vars: `{{item}}`, `{{index}}`, `{{total}}`, `{{runId}}` |
+| `reduce` | object | No | `{ session, promptTemplate }`. The reducer fires once all items return; `{{results}}` is the joined outputs |
+
+Returns `{ runId, pool, total, reduce, dispatched: [...] }`. If a shard never returns, the reducer fires with partial results after `HAIFLOW_MAP_TIMEOUT_SEC` (default 1800).
+
+### `GET /map/:runId`
+
+Progress of a map run: `{ runId, pool, total, collected, reduced, reduceTaskId }`.
+
 ## Pipeline
 
 The pipeline system enables event-driven agent chains. When an agent finishes a task, it can emit an event to a topic. Other agents subscribed to that topic automatically receive the output as their next prompt.

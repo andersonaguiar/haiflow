@@ -169,6 +169,8 @@ cp .env.example .env
 | `HAIFLOW_TASK_TIMEOUT_SEC` | `0` | Optional hard per-task timeout. `0` disables it. The watchdog flags tasks that exceed it |
 | `HAIFLOW_WAITING_GRACE_SEC` | `120` | How long a session flagged `waiting` by Claude's Notification hook may stay blocked before the watchdog acts |
 | `HAIFLOW_WATCHDOG_RECOVER` | `false` | When `true`, the watchdog auto-recovers a wedged session (Escape, mark `timed_out`, drain). Default alert-only |
+| `HAIFLOW_MAP_MAX_ITEMS` | `200` | Max items one `POST /map` call may fan across a pool |
+| `HAIFLOW_MAP_TIMEOUT_SEC` | `1800` | How long a map run waits for stragglers before the reducer fires with partial results |
 
 ## Authentication
 
@@ -229,7 +231,7 @@ Haiflow outputs structured JSON logs to stdout/stderr for all key events:
 {"ts":"2026-03-18T02:35:10Z","level":"warn","event":"auth_rejected","path":"/trigger"}
 ```
 
-Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_deduped`, `trigger_failed`, `queue_drained`, `queue_cleared`, `queue_item_removed`, `queue_item_reprioritized`, `task_cancelled`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `hook_notification`, `interrupt_sent`, `watchdog_triggered`, `watchdog_recovered`, `auth_rejected`, `redis_connected`, `redis_unavailable`, `event_published`, `event_published_direct`, `pipeline_dispatched`, `pipeline_queued`, `pipeline_subscriber_offline`, `pipeline_circular_skipped`, `pipeline_prompt_too_large`, `pipeline_webhook_sent`, `pipeline_webhook_failed`, `publish_unknown_topic`, `publish_unauthorized`.
+Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_deduped`, `trigger_failed`, `queue_drained`, `queue_cleared`, `queue_item_removed`, `queue_item_reprioritized`, `task_cancelled`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `hook_notification`, `interrupt_sent`, `watchdog_triggered`, `watchdog_recovered`, `auth_rejected`, `redis_connected`, `redis_unavailable`, `event_published`, `event_published_direct`, `pipeline_dispatched`, `pipeline_queued`, `pipeline_subscriber_offline`, `pipeline_circular_skipped`, `pipeline_prompt_too_large`, `pipeline_webhook_sent`, `pipeline_webhook_failed`, `publish_unknown_topic`, `publish_unauthorized`, `pool_dispatched`, `map_started`, `map_progress`, `map_reduced`, `map_reduced_partial`.
 
 ## How it works
 
@@ -295,6 +297,14 @@ alias ct='curl -s -X POST http://localhost:3333/trigger \
   -H "Authorization: Bearer $HAIFLOW_API_KEY" \
   -H "Content-Type: application/json" -d'
 ct '{"prompt": "explain the error in the logs", "id": "debug-1"}'
+```
+
+## Worker pools & map-reduce
+
+Define a pool of member sessions in `pipeline.json` and haiflow load-balances work across them. `POST /pool/:name/trigger` sends one prompt to an idle member; `POST /map` fans a list of items across the pool in parallel and fires a reducer once every item returns (the fan-in / JOIN). Because it all runs on one flat subscription, mapping 40 files across a pool of workers costs nothing extra per token. See [Worker pools & map-reduce](API.md) in the API reference for the full request shape.
+
+```json
+{ "pools": { "reviewers": { "members": ["reviewer-1", "reviewer-2", "reviewer-3"] } } }
 ```
 
 ## Pipeline
