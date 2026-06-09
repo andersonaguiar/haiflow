@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync, statSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync, statSync, renameSync } from "fs";
 import dashboard from "./dashboard/index.html";
 import {
   sanitizeSession, sanitizeId, generateId, tmuxName,
@@ -124,6 +124,7 @@ interface State {
   waitingSince?: string;
   deadlineAt?: string;
   transcriptPath?: string;
+  currentDedupKey?: string;
 }
 
 interface QueueItem {
@@ -132,6 +133,10 @@ interface QueueItem {
   addedAt: string;
   source?: string;
   chain?: string[];
+  // Smart-queue fields.
+  priority?: number;     // higher drains first; default 0
+  dedupKey?: string;     // a second enqueue with the same key is dropped
+  notBefore?: string;    // ISO time before which the item is not eligible
 }
 
 // --- Pipeline types ---
@@ -140,6 +145,7 @@ interface PipelineSubscriber {
   session: string;
   promptTemplate: string;
   enabled?: boolean;
+  priority?: number;
 }
 
 interface WebhookSubscriber {
@@ -237,7 +243,7 @@ async function deliverToSubscribers(
 
     if (state.status === "offline") {
       const queue = readQueue(subscriberSession);
-      queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain });
+      queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain, priority: sub.priority });
       writeQueue(subscriberSession, queue);
       log("warn", "pipeline_subscriber_offline", { topic, subscriber: subscriberSession, taskId });
       if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "queued");
@@ -246,7 +252,7 @@ async function deliverToSubscribers(
 
     if (state.status === "busy") {
       const queue = readQueue(subscriberSession);
-      queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain });
+      queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain, priority: sub.priority });
       writeQueue(subscriberSession, queue);
       log("info", "pipeline_queued", { topic, subscriber: subscriberSession, taskId });
       if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "queued");
@@ -383,6 +389,22 @@ function responseFile(session: string, id: string): string {
   return `${p.responses}/${sanitizeId(id)}.json`;
 }
 
+// Write atomically: write a temp file in the same dir, then rename over the
+// target. rename(2) is atomic on POSIX, so a reader never sees a half-written
+// file and a crash mid-write can't corrupt the existing one. This is what keeps
+// concurrent queue/state updates (trigger, drain, delay tick, pipeline) from
+// tearing each other's writes.
+function atomicWrite(path: string, data: string) {
+  const tmp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, data);
+    renameSync(tmp, path);
+  } catch {
+    try { writeFileSync(path, data); } catch {}
+    try { unlinkSync(tmp); } catch {}
+  }
+}
+
 function readState(session: string): State {
   const p = sessionPaths(session);
   if (!existsSync(p.state)) {
@@ -406,7 +428,7 @@ function writeState(session: string, updates: Partial<Omit<State, "queueLength" 
     try { existing = JSON.parse(readFileSync(p.state, "utf-8")); } catch {}
   }
   const merged = { ...existing, ...updates };
-  writeFileSync(p.state, JSON.stringify(merged, null, 2));
+  atomicWrite(p.state, JSON.stringify(merged, null, 2));
 }
 
 function readQueue(session: string): QueueItem[] {
@@ -421,7 +443,47 @@ function readQueue(session: string): QueueItem[] {
 
 function writeQueue(session: string, queue: QueueItem[]) {
   const p = sessionPaths(session);
-  writeFileSync(p.queue, JSON.stringify(queue, null, 2));
+  atomicWrite(p.queue, JSON.stringify(queue, null, 2));
+}
+
+// Pick the highest-priority eligible item from a queue. Ties break FIFO (the
+// earliest-added wins). Items with a future `notBefore` are skipped until ready.
+function pickNext(queue: QueueItem[]): { item: QueueItem; index: number } | null {
+  const now = Date.now();
+  let best = -1;
+  for (let i = 0; i < queue.length; i++) {
+    const it = queue[i]!;
+    if (it.notBefore && Date.parse(it.notBefore) > now) continue;
+    if (best === -1) { best = i; continue; }
+    if ((it.priority ?? 0) > (queue[best]!.priority ?? 0)) best = i;
+  }
+  return best === -1 ? null : { item: queue[best]!, index: best };
+}
+
+// A dedupKey already in flight (running or queued) means this enqueue is a
+// duplicate (e.g. a webhook that fired twice) and should be dropped.
+function isDuplicate(session: string, dedupKey: string | undefined): boolean {
+  if (!dedupKey) return false;
+  const state = readState(session);
+  if (state.status !== "offline" && state.currentDedupKey === dedupKey) return true;
+  return readQueue(session).some((q) => q.dedupKey === dedupKey);
+}
+
+// Normalise the smart-queue fields from a request/subscriber into a partial
+// QueueItem. Accepts notBefore (ISO) or delaySeconds (relative).
+function queueOptions(opts: { priority?: unknown; dedupKey?: unknown; notBefore?: unknown; delaySeconds?: unknown }): {
+  priority?: number; dedupKey?: string; notBefore?: string;
+} {
+  const priority = Number(opts.priority);
+  const delay = Number(opts.delaySeconds);
+  let notBefore: string | undefined;
+  if (typeof opts.notBefore === "string") notBefore = opts.notBefore;
+  else if (Number.isFinite(delay) && delay > 0) notBefore = new Date(Date.now() + delay * 1000).toISOString();
+  return {
+    priority: Number.isFinite(priority) && priority !== 0 ? priority : undefined,
+    dedupKey: typeof opts.dedupKey === "string" && opts.dedupKey ? opts.dedupKey : undefined,
+    notBefore,
+  };
 }
 
 function getSessionId(session: string): string | null {
@@ -537,9 +599,11 @@ function drainQueue(session: string) {
   if (state.status !== "idle") return;
 
   const queue = readQueue(session);
-  if (queue.length === 0) return;
+  const picked = pickNext(queue);
+  if (!picked) return;
 
-  const next = queue.shift()!;
+  const next = picked.item;
+  queue.splice(picked.index, 1);
   writeQueue(session, queue);
 
   writeState(session, {
@@ -548,6 +612,7 @@ function drainQueue(session: string) {
     currentPrompt: next.prompt,
     currentTaskId: next.id,
     currentChain: next.chain,
+    currentDedupKey: next.dedupKey,
     deadlineAt: taskDeadline(),
   });
   recordTaskStart({ id: next.id, session, prompt: next.prompt, source: next.source ?? "queue", chain: next.chain });
@@ -731,6 +796,14 @@ const server = Bun.serve({
           return Response.json({ error: `Prompt rejected: ${validation.reason}` }, { status: 400 });
         }
 
+        const { priority, dedupKey, notBefore } = queueOptions(body);
+
+        // Drop duplicates (e.g. a webhook that fired twice) before doing anything.
+        if (isDuplicate(session, dedupKey)) {
+          log("info", "trigger_deduped", { session, taskId: id, dedupKey });
+          return Response.json({ id, session, deduped: true, message: "A task with this dedupKey is already running or queued." });
+        }
+
         const state = readState(session);
 
         if (state.status === "offline") {
@@ -740,14 +813,19 @@ const server = Bun.serve({
           );
         }
 
-        if (state.status === "busy") {
+        const delayed = notBefore ? Date.parse(notBefore) > Date.now() : false;
+
+        // Queue if busy, or if the item is scheduled for later (the delay tick
+        // and the next drain pick it up when notBefore passes).
+        if (state.status === "busy" || delayed) {
           const queue = readQueue(session);
-          queue.push({ id, prompt, addedAt: new Date().toISOString(), source });
+          queue.push({ id, prompt, addedAt: new Date().toISOString(), source, priority, dedupKey, notBefore });
           writeQueue(session, queue);
-          log("info", "trigger_queued", { session, taskId: id, position: queue.length });
+          log("info", "trigger_queued", { session, taskId: id, position: queue.length, priority, delayed });
           return Response.json({
             id, session, queued: true, position: queue.length,
-            message: "Claude is busy. Prompt added to queue.",
+            ...(delayed ? { notBefore } : {}),
+            message: delayed ? "Scheduled for later." : "Claude is busy. Prompt added to queue.",
           });
         }
 
@@ -756,6 +834,7 @@ const server = Bun.serve({
           since: new Date().toISOString(),
           currentPrompt: prompt,
           currentTaskId: id,
+          currentDedupKey: dedupKey,
           deadlineAt: taskDeadline(),
         });
         recordTaskStart({ id, session, prompt, source: source ?? "trigger" });
@@ -786,7 +865,8 @@ const server = Bun.serve({
       }),
     },
 
-    // Remove a single queued item by id (vs DELETE /queue which clears all).
+    // Remove a single queued item by id (vs DELETE /queue which clears all),
+    // or re-prioritise it with POST { priority }.
     "/queue/:id": {
       DELETE: authed((req) => {
         const session = getSessionParam(req);
@@ -798,6 +878,20 @@ const server = Bun.serve({
         writeQueue(session, queue);
         log("info", "queue_item_removed", { session, taskId: id });
         return Response.json({ session, id, removed: true });
+      }),
+      POST: authed(async (req) => {
+        const session = getSessionParam(req);
+        const id = sanitizeId(req.params.id);
+        const body = await req.json().catch(() => ({}));
+        const priority = Number(body.priority);
+        if (!Number.isFinite(priority)) return Response.json({ error: "priority (number) is required" }, { status: 400 });
+        const queue = readQueue(session);
+        const item = queue.find((q) => q.id === id);
+        if (!item) return Response.json({ error: "Queued item not found" }, { status: 404 });
+        item.priority = priority;
+        writeQueue(session, queue);
+        log("info", "queue_item_reprioritized", { session, taskId: id, priority });
+        return Response.json({ session, id, priority });
       }),
     },
 
@@ -1569,6 +1663,15 @@ setInterval(async () => {
   const pruned = await eventBus.prune(7);
   if (pruned > 0) log("info", "events_pruned", { count: pruned });
 }, 86_400_000);
+
+// Delay tick: drain scheduled queue items once their notBefore passes, even on
+// an idle session (normal draining only happens when a task Stops). drainQueue
+// no-ops when nothing is eligible, so this is cheap.
+setInterval(() => {
+  for (const { session, status } of listSessions()) {
+    if (status === "idle") drainQueue(session);
+  }
+}, 5_000);
 
 // Watchdog: catch sessions wedged on a permission prompt (flagged "waiting" by
 // the Notification hook) or past their hard deadline, so a stuck session can't

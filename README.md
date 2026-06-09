@@ -229,7 +229,7 @@ Haiflow outputs structured JSON logs to stdout/stderr for all key events:
 {"ts":"2026-03-18T02:35:10Z","level":"warn","event":"auth_rejected","path":"/trigger"}
 ```
 
-Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_failed`, `queue_drained`, `queue_cleared`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `hook_notification`, `interrupt_sent`, `watchdog_triggered`, `watchdog_recovered`, `auth_rejected`, `redis_connected`, `redis_unavailable`, `event_published`, `event_published_direct`, `pipeline_dispatched`, `pipeline_queued`, `pipeline_subscriber_offline`, `pipeline_circular_skipped`, `pipeline_prompt_too_large`, `pipeline_webhook_sent`, `pipeline_webhook_failed`, `publish_unknown_topic`, `publish_unauthorized`.
+Events: `server_started`, `sessions_recovered`, `session_started`, `session_stopped`, `session_start_failed`, `trigger_sent`, `trigger_queued`, `trigger_deduped`, `trigger_failed`, `queue_drained`, `queue_cleared`, `queue_item_removed`, `queue_item_reprioritized`, `task_cancelled`, `response_saved`, `stream_opened`, `hook_session_start`, `hook_stop`, `hook_session_end`, `hook_notification`, `interrupt_sent`, `watchdog_triggered`, `watchdog_recovered`, `auth_rejected`, `redis_connected`, `redis_unavailable`, `event_published`, `event_published_direct`, `pipeline_dispatched`, `pipeline_queued`, `pipeline_subscriber_offline`, `pipeline_circular_skipped`, `pipeline_prompt_too_large`, `pipeline_webhook_sent`, `pipeline_webhook_failed`, `publish_unknown_topic`, `publish_unauthorized`.
 
 ## How it works
 

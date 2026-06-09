@@ -74,11 +74,20 @@ curl -X POST http://localhost:3333/trigger \
 | `session` | string | No | Session name (default: `"default"`) |
 | `id` | string | No | Custom task ID (auto-generated if omitted) |
 | `source` | string | No | Label for where the trigger came from |
+| `priority` | number | No | Higher drains first; ties break FIFO (default `0`) |
+| `dedupKey` | string | No | A second enqueue with the same key (while one is running or queued) is dropped |
+| `delaySeconds` | number | No | Schedule the task for later. The drain picks it up once due, even on an idle session |
+| `notBefore` | string | No | ISO timestamp form of `delaySeconds` (takes precedence if both given) |
 
 Responses:
 - **Idle**: `{"id": "...", "sent": true}` — sent immediately
-- **Busy**: `{"id": "...", "queued": true, "position": 1}` — auto-sends when idle
+- **Busy** (or scheduled): `{"id": "...", "queued": true, "position": 1}` — auto-sends when idle / due
+- **Duplicate**: `{"id": "...", "deduped": true}` — dropped, a task with that `dedupKey` is already in flight
 - **Offline**: `503` error
+
+### `POST /queue/:id`
+
+Re-prioritise a queued item: `{ "priority": 9 }`. Returns `404` if the id is not queued.
 
 ## `GET /responses/:id`
 
