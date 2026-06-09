@@ -180,6 +180,12 @@ cp .env.example .env
 
 **Why this matters:** Without auth, anyone who can reach your server could send arbitrary prompts to Claude Code running with full file and git access. That means reading your source code, modifying files, running shell commands, or exfiltrating data — all through a simple HTTP request.
 
+### Secret redaction
+
+As defence-in-depth against the agent printing a secret it read while debugging, haiflow runs a best-effort redaction pass over every outbound text (responses, pipeline messages, webhooks, chat replies) before it leaves the box. It strips well-known credential shapes (AWS/GitHub/Stripe/Google/Anthropic/OpenAI keys, JWTs, Bearer tokens, private-key blocks), replacing each with `[REDACTED:type]` and recording a count. It is on by default (disable with `HAIFLOW_REDACT=false`); emails are opt-in (`HAIFLOW_REDACT_EMAILS=true`); add your own patterns with `HAIFLOW_REDACT_EXTRA`. This is best-effort DLP, not a firewall: it won't catch an encoded or reshaped secret, and it only ever rewrites outbound text, never the files the agent writes inside its working directory.
+
+### Bearer token
+
 The server will refuse to start without it. All API endpoints (except `/health` and `/hooks/*`) require an `Authorization` header:
 
 ```bash

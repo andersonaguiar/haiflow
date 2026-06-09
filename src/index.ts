@@ -12,6 +12,7 @@ import {
 } from "./ledger";
 import { estimateSavings } from "./pricing";
 import { verifySignature, buildFramedPrompt, type IngestRecipe } from "./ingest";
+import { redact } from "./redact";
 
 const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
@@ -43,6 +44,25 @@ const MAP_TIMEOUT_MS = (Number(process.env.HAIFLOW_MAP_TIMEOUT_SEC ?? 1800) || 1
 // the guardrail skill, so it is gated by the API key (the operator's root trust
 // boundary) and this kill-switch. Default on, since the key is already required.
 const ALLOW_TAKEOVER = (process.env.HAIFLOW_ALLOW_TAKEOVER ?? "true").toLowerCase() !== "false";
+
+// Best-effort secret redaction on every outbound text (response capture,
+// pipeline messages, webhooks, chat replies). On by default for high-confidence
+// credential shapes; emails are opt-in (noisier). See src/redact.ts.
+const REDACT_ENABLED = (process.env.HAIFLOW_REDACT ?? "true").toLowerCase() !== "false";
+const REDACT_EMAILS = (process.env.HAIFLOW_REDACT_EMAILS ?? "false").toLowerCase() === "true";
+const REDACT_EXTRA: RegExp[] = (() => {
+  try {
+    const raw = process.env.HAIFLOW_REDACT_EXTRA;
+    if (!raw) return [];
+    return (JSON.parse(raw) as string[]).map((s) => new RegExp(s, "g"));
+  } catch { return []; }
+})();
+
+function redactOut(text: string): { text: string; count: number } {
+  if (!REDACT_ENABLED) return { text, count: 0 };
+  const r = redact(text, { emails: REDACT_EMAILS, extraPatterns: REDACT_EXTRA });
+  return { text: r.text, count: r.count };
+}
 
 function taskDeadline(): string | undefined {
   return TASK_TIMEOUT_SEC > 0 ? new Date(Date.now() + TASK_TIMEOUT_SEC * 1000).toISOString() : undefined;
@@ -620,20 +640,25 @@ function saveResponse(session: string, taskId: string, prompt?: string, transcri
           transcriptPath]).stdout.toString()
       );
       if (Array.isArray(messages) && messages.length > 0) {
+        let redactions = 0;
+        const safe = messages.map((m: string) => { const r = redactOut(String(m)); redactions += r.count; return r.text; });
         writeFileSync(file, JSON.stringify({
-          id: taskId, completed_at: new Date().toISOString(), prompt, messages,
+          id: taskId, completed_at: new Date().toISOString(), prompt, messages: safe,
+          ...(redactions > 0 ? { redactions } : {}),
         }, null, 2));
-        log("info", "response_saved", { session, taskId, source: "transcript" });
+        log("info", "response_saved", { session, taskId, source: "transcript", redactions });
         return;
       }
     } catch {}
   }
 
   if (lastMessage) {
+    const r = redactOut(lastMessage);
     writeFileSync(file, JSON.stringify({
-      id: taskId, completed_at: new Date().toISOString(), prompt, messages: [lastMessage],
+      id: taskId, completed_at: new Date().toISOString(), prompt, messages: [r.text],
+      ...(r.count > 0 ? { redactions: r.count } : {}),
     }, null, 2));
-    log("info", "response_saved", { session, taskId, source: "fallback" });
+    log("info", "response_saved", { session, taskId, source: "fallback", redactions: r.count });
   }
 }
 
@@ -1297,7 +1322,7 @@ const server = Bun.serve({
         await publishEvent(topic, {
           session: session ?? "external",
           taskId: generateId(),
-          message,
+          message: redactOut(message).text,
           external: true,
         });
 
@@ -1652,10 +1677,11 @@ const server = Bun.serve({
             savedUsd: extract?.usage ? estimateSavings(extract.usage, extract.model) : null,
           });
 
-          // Pipeline: emit to subscribed topics, propagating chain for circular detection
+          // Pipeline: emit to subscribed topics, propagating chain for circular detection.
+          // Redact before anything leaves the session (subscribers, webhooks, map).
           const pipeline = readPipeline();
           const emitterTopics = pipeline.emitters[session] ?? [];
-          const responseText = body.last_assistant_message ?? "";
+          const responseText = redactOut(body.last_assistant_message ?? "").text;
           for (const topic of emitterTopics) {
             await publishEvent(topic, {
               session,

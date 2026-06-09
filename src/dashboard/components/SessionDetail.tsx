@@ -12,14 +12,14 @@ type Tab = "terminal" | "queue" | "responses" | "history";
 
 function ExpandableResponse({ session, id, completedAt }: { session: string; id: string; completedAt: string }) {
   const [open, setOpen] = useState(false);
-  const [data, setData] = useState<{ prompt?: string; messages?: string[] } | null>(null);
+  const [data, setData] = useState<{ prompt?: string; messages?: string[]; redactions?: number } | null>(null);
 
   const load = async () => {
     if (data) { setOpen(!open); return; }
     setOpen(true);
     try {
       const res = await getResponse(session, id);
-      setData({ prompt: res.data.prompt, messages: res.data.messages || [] });
+      setData({ prompt: res.data.prompt, messages: res.data.messages || [], redactions: res.data.redactions });
     } catch {
       setData({ messages: ["Failed to load response"] });
     }
@@ -44,6 +44,11 @@ function ExpandableResponse({ session, id, completedAt }: { session: string; id:
           )}
           <div>
             <span className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Response</span>
+            {data.redactions ? (
+              <span className="ml-2 text-[10px] text-amber-400/80" title="Secret-shaped strings were redacted from this response before storage">
+                {data.redactions} redaction{data.redactions === 1 ? "" : "s"}
+              </span>
+            ) : null}
             {data.messages?.map((msg, i) => (
               <pre key={i} className="text-xs text-gray-300 bg-gray-800 rounded p-2 mt-0.5 whitespace-pre-wrap break-words overflow-x-auto">
                 {msg}

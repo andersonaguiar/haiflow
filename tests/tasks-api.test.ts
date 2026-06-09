@@ -196,3 +196,20 @@ describe("hook doctor", () => {
     expect(Array.isArray(res.data.sessions)).toBe(true);
   });
 });
+
+describe("secret redaction on capture", () => {
+  test("redacts a secret in the saved response", async () => {
+    const session = "redact-e2e";
+    const claudeId = "claude-redact-e2e";
+    seedSession(session, claudeId, "rtask");
+    await api("/hooks/stop", "POST", {
+      session_id: claudeId,
+      last_assistant_message: "The key is AKIAIOSFODNN7EXAMPLE — keep it safe.",
+    });
+    const resp = await api(`/responses/rtask?session=${session}`);
+    expect(resp.status).toBe(200);
+    expect(resp.data.messages[0]).toContain("[REDACTED:aws-access-key]");
+    expect(resp.data.messages[0]).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(resp.data.redactions).toBe(1);
+  });
+});
