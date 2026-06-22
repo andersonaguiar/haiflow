@@ -1,6 +1,6 @@
 # API Reference
 
-All endpoints (except `/health` and `/hooks/*`) require an `Authorization: Bearer <HAIFLOW_API_KEY>` header. `HAIFLOW_API_KEY` is any secret string you define — not a paid key or external credential.
+All endpoints (except `/health`, `/version` and `/hooks/*`) require an `Authorization: Bearer <HAIFLOW_API_KEY>` header. `HAIFLOW_API_KEY` is any secret string you define — not a paid key or external credential.
 
 ## `POST /session/start`
 
@@ -427,3 +427,13 @@ curl -X POST http://localhost:3333/publish \
 ## `GET /health`
 
 Returns `ok`.
+
+## `GET /version`
+
+Unauthenticated. Returns the running build so operators can confirm which version a remote haiflow is on:
+
+```json
+{ "version": "0.1.0", "startedAt": "2026-06-22T10:00:00.000Z", "redis": true }
+```
+
+`haiflow version` prints the same version from the CLI.

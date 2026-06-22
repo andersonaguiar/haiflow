@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { resolve, dirname } from "path";
 
 const PORT = process.env.PORT ?? "3333";
@@ -54,6 +54,15 @@ async function serve() {
     process.exit(1);
   }
   await import(SERVER_ENTRY);
+}
+
+function version() {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(PACKAGE_ROOT, "package.json"), "utf-8"));
+    console.log(pkg.version ?? "unknown");
+  } catch {
+    console.log("unknown");
+  }
 }
 
 async function github() {
@@ -286,6 +295,7 @@ Commands:
   status [session]               Check session status
   sessions                       List all sessions
   responses [id]                 Get responses
+  version                        Print the haiflow version
 
 Options:
   --cwd <path>       Working directory (required for start)
@@ -339,6 +349,11 @@ switch (command) {
     break;
   case "responses":
     await responses();
+    break;
+  case "version":
+  case "--version":
+  case "-v":
+    version();
     break;
   default:
     usage();

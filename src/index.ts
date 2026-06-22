@@ -79,6 +79,17 @@ const MAX_PROMPT_SIZE = 512_000;
 // knowingly run ingest without Redis and accept that replay risk.
 const INGEST_ALLOW_WITHOUT_REDIS = (process.env.HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS ?? "false").toLowerCase() === "true";
 
+// Build version + boot time, surfaced at GET /version so operators can confirm
+// which build a remote haiflow is running across the npm/install.sh/n8n paths.
+const VERSION: string = (() => {
+  try {
+    return JSON.parse(readFileSync(`${import.meta.dir}/../package.json`, "utf-8")).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+const STARTED_AT = new Date().toISOString();
+
 if (!API_KEY) {
   console.error("HAIFLOW_API_KEY is required. Set it in your .env or environment.");
   process.exit(1);
@@ -659,31 +670,22 @@ function sendInterrupt(session: string, mode: "escape" | "ctrl-c" = "escape"): b
   return Bun.spawnSync(["tmux", "send-keys", "-t", target, key]).exitCode === 0;
 }
 
-function saveResponse(session: string, taskId: string, prompt?: string, transcriptPath?: string, lastMessage?: string) {
+// Persist the response for a finished task. `messages` are the assistant text
+// blocks already mined from the transcript by extractFromTranscript (the same
+// parse the ledger uses), so there is no second jq/transcript pass here.
+function saveResponse(session: string, taskId: string, prompt?: string, messages?: string[], lastMessage?: string) {
   if (!taskId) return;
   const file = responseFile(session, taskId);
 
-  if (transcriptPath && isAllowedTranscriptPath(transcriptPath) && existsSync(transcriptPath)) {
-    try {
-      const lastUserLine = JSON.parse(
-        Bun.spawnSync(["jq", "-s", 'to_entries | map(select(.value.type == "user")) | last | .key', transcriptPath]).stdout.toString()
-      );
-      const messages = JSON.parse(
-        Bun.spawnSync(["jq", "-s", "--argjson", "start", String(lastUserLine ?? 0),
-          '[.[$start:][] | select(.type == "assistant" and .message.role == "assistant") | .message.content[] | select(.type == "text") | .text]',
-          transcriptPath]).stdout.toString()
-      );
-      if (Array.isArray(messages) && messages.length > 0) {
-        let redactions = 0;
-        const safe = messages.map((m: string) => { const r = redactOut(String(m)); redactions += r.count; return r.text; });
-        writeFileSync(file, JSON.stringify({
-          id: taskId, completed_at: new Date().toISOString(), prompt, messages: safe,
-          ...(redactions > 0 ? { redactions } : {}),
-        }, null, 2));
-        log("info", "response_saved", { session, taskId, source: "transcript", redactions });
-        return;
-      }
-    } catch {}
+  if (messages && messages.length > 0) {
+    let redactions = 0;
+    const safe = messages.map((m) => { const r = redactOut(String(m)); redactions += r.count; return r.text; });
+    writeFileSync(file, JSON.stringify({
+      id: taskId, completed_at: new Date().toISOString(), prompt, messages: safe,
+      ...(redactions > 0 ? { redactions } : {}),
+    }, null, 2));
+    log("info", "response_saved", { session, taskId, source: "transcript", redactions });
+    return;
   }
 
   if (lastMessage) {
@@ -697,10 +699,10 @@ function saveResponse(session: string, taskId: string, prompt?: string, transcri
   }
 
   // Neither the transcript nor a last_assistant_message yielded text (e.g. the
-  // task ended on tool calls with no trailing prose, or jq is unavailable).
-  // Still write a definitive completion so pollers on /responses/:id and SSE
-  // streams see the task finish instead of hanging until their timeout (which
-  // surfaces to chat/GitHub bridges as a false "still working" reply).
+  // task ended on tool calls with no trailing prose). Still write a definitive
+  // completion so pollers on /responses/:id and SSE streams see the task finish
+  // instead of hanging until their timeout (which surfaces to the GitHub bridge
+  // as a false "still working" reply).
   writeFileSync(file, JSON.stringify({
     id: taskId, completed_at: new Date().toISOString(), prompt, messages: ["(no text output)"],
   }, null, 2));
@@ -1719,12 +1721,13 @@ const server = Bun.serve({
 
         const state = readState(session);
         if (state.currentTaskId) {
-          saveResponse(session, state.currentTaskId, state.currentPrompt, body.transcript_path, body.last_assistant_message);
-
-          // Durable ledger: mine the transcript for the tool/command/diff timeline + token usage
+          // Mine the transcript once for both the response capture and the
+          // durable ledger (tool/command/diff timeline + token usage).
           const extract = (body.transcript_path && isAllowedTranscriptPath(body.transcript_path))
             ? extractFromTranscript(body.transcript_path)
             : null;
+          saveResponse(session, state.currentTaskId, state.currentPrompt, extract?.messages, body.last_assistant_message);
+
           recordTaskFinish({
             id: state.currentTaskId,
             session,
@@ -1919,6 +1922,9 @@ const server = Bun.serve({
     },
 
     "/health": new Response("ok"),
+    "/version": {
+      GET: () => Response.json({ version: VERSION, startedAt: STARTED_AT, redis: eventBus.connected }),
+    },
     "/dashboard": dashboard,
 
     // WebSocket upgrade for live terminal view

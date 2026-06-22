@@ -455,6 +455,19 @@ describe("POST /hooks/prompt", () => {
   });
 });
 
+describe("GET /version", () => {
+  test("returns version, startedAt and redis status without auth", async () => {
+    // No Authorization header — /version is unauthenticated like /health.
+    const res = await fetch(`${BASE}/version`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(typeof data.version).toBe("string");
+    expect(data.version.length).toBeGreaterThan(0);
+    expect(typeof data.startedAt).toBe("string");
+    expect(typeof data.redis).toBe("boolean");
+  });
+});
+
 describe("POST /hooks/stop", () => {
   test("returns ok for unknown session", async () => {
     const { data } = await api("/hooks/stop", "POST", {
@@ -521,6 +534,39 @@ describe("POST /hooks/stop (known session)", () => {
     const { status, data: resp } = await api(`/responses/stop-empty-001?session=${session}`);
     expect(status).toBe(200);
     expect(resp.messages).toEqual(["(no text output)"]);
+  });
+
+  test("captures assistant messages from the transcript (no jq dependency)", async () => {
+    const session = "hook-stop-transcript";
+    const claudeId = "claude-stop-transcript-id";
+    const dir = `${TEST_DIR}/${session}`;
+    mkdirSync(`${dir}/responses`, { recursive: true });
+    writeFileSync(`${dir}/session-id`, claudeId);
+    writeFileSync(
+      `${dir}/state.json`,
+      JSON.stringify({ status: "busy", since: new Date().toISOString(), currentTaskId: "stop-transcript-001" })
+    );
+
+    // Minimal transcript under an allowed prefix (/tmp/claude). saveResponse now
+    // reuses extractFromTranscript instead of shelling out to jq.
+    mkdirSync("/tmp/claude", { recursive: true });
+    const tpath = "/tmp/claude/haiflow-test-transcript.jsonl";
+    writeFileSync(tpath, [
+      JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "do the thing" }] } }),
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Transcript answer." }], usage: { output_tokens: 3 } } }),
+    ].join("\n"));
+
+    try {
+      // No last_assistant_message, so the transcript extraction must supply the text.
+      const { data } = await api("/hooks/stop", "POST", { session_id: claudeId, transcript_path: tpath });
+      expect(data.ok).toBe(true);
+
+      const { status, data: resp } = await api(`/responses/stop-transcript-001?session=${session}`);
+      expect(status).toBe(200);
+      expect(resp.messages).toEqual(["Transcript answer."]);
+    } finally {
+      if (existsSync(tpath)) unlinkSync(tpath);
+    }
   });
 
   test("drains queue after stop", async () => {
