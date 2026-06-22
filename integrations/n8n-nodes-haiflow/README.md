@@ -51,7 +51,7 @@ Returns haiflow's trigger result. When the session is idle you get `{ id, sessio
 
 ### Trigger and Wait
 
-This is the headline operation. It sends the prompt (`POST /trigger`) and then consumes the Server-Sent Events stream (`GET /responses/:id/stream`) until the task completes, mirroring the SSE parser used by haiflow's Telegram bot. Fields are the same as **Trigger**, plus:
+This is the headline operation. It sends the prompt (`POST /trigger`) and then consumes the Server-Sent Events stream (`GET /responses/:id/stream`) until the task completes. Fields are the same as **Trigger**, plus:
 
 - **Timeout (Seconds)** (default 300, max 600): how long to wait for the stream. haiflow caps this server side at 600 seconds.
 

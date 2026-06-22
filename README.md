@@ -267,29 +267,6 @@ Import the chained calc workflow from `examples/chained-calc/`:
 - `chained-calc-step3.json` — Step 3: multiply result by 10
 - `pipeline-calc-chain.json` — Pipeline configuration that wires them together
 
-### Telegram bot
-
-Drive haiflow from a Telegram chat. The bundled bot long-polls Telegram, forwards each message to `POST /trigger`, streams the response back, and replies in the same chat — no public webhook or extra infrastructure needed.
-
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Add it to your `.env` (alongside the existing `HAIFLOW_API_KEY`):
-
-   ```bash
-   TELEGRAM_BOT_TOKEN=123456:ABC-your-bot-token
-   TELEGRAM_SESSION=worker                 # which session to drive (default: "default")
-   TELEGRAM_ALLOWED_CHAT_IDS=123456789     # comma-separated allowlist (see below)
-   ```
-
-3. Start the bot in its own process (the haiflow server and a session must be running):
-
-   ```bash
-   haiflow telegram         # or: bun run telegram
-   ```
-
-Now message the bot — each message runs as a prompt and Claude's reply comes back in the chat. Slash commands you've configured (e.g. `/daily-update`) work too; `/start` and `/help` are handled by the bot itself.
-
-> ⚠️ **Lock it down.** Messaging the bot drives Claude Code on your machine. Always set `TELEGRAM_ALLOWED_CHAT_IDS` — with it empty, the bot replies to anyone who finds it. To find your chat ID, message the bot once and read it from the logs (`chat_rejected`/`prompt_received`), or ask [@userinfobot](https://t.me/userinfobot). The `haiflow-guardrails` skill (file/secret/network restrictions) still applies as defence-in-depth.
-
 ### GitHub bridge
 
 Mention `@haiflow` in a GitHub issue or PR comment and Claude Code addresses it in the locally checked-out repo: on a branch, as a **draft** PR, never touching the default branch. The bridge is a thin, gated relay; Claude does the branch/commit/PR work itself (it has `gh` and `git` in the session).
@@ -482,7 +459,7 @@ See `examples/chained-calc/pipeline-calc-chain.json` for a chained calc workflow
 haiflow/
 ├── src/
 │   ├── index.ts              # Bun HTTP server
-│   ├── telegram-bot.ts       # Telegram → haiflow bridge (haiflow telegram)
+│   ├── github-bot.ts         # GitHub webhook bridge (haiflow github)
 │   └── dashboard/            # Web dashboard (React + Tailwind)
 │       ├── index.html
 │       ├── app.tsx
@@ -520,7 +497,7 @@ haiflow/
 | `bun run setup` | Install Claude Code hooks |
 | `bun run dev` | Start server with hot reload |
 | `bun run start` | Start server |
-| `bun run telegram` | Run the Telegram bot bridge |
+| `bun run github` | Run the GitHub webhook bridge |
 | `bun run deps` | Check all dependencies |
 | `bun run doctor` | Full health check (server, n8n, sessions, pipeline) |
 | `bun test` | Run tests |

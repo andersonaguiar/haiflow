@@ -2,7 +2,7 @@
 //
 // The most likely real-world leak is the agent printing a secret it read while
 // debugging, which then flows out through a response, a pipeline message, a
-// webhook, or a Telegram reply. haiflow has one natural choke point for all of
+// webhook, or a chat reply. haiflow has one natural choke point for all of
 // that (Stop -> capture -> deliver), so a single pass here covers every egress.
 //
 // This is best-effort DLP, NOT a firewall: it mitigates ACCIDENTAL egress of

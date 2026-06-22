@@ -8,7 +8,6 @@ const BASE = `http://localhost:${PORT}`;
 const PACKAGE_ROOT = dirname(import.meta.dir);
 const HOOKS_DIR = resolve(PACKAGE_ROOT, "hooks");
 const SERVER_ENTRY = resolve(PACKAGE_ROOT, "src/index.ts");
-const TELEGRAM_ENTRY = resolve(PACKAGE_ROOT, "src/telegram-bot.ts");
 const GITHUB_ENTRY = resolve(PACKAGE_ROOT, "src/github-bot.ts");
 
 const args = process.argv.slice(2);
@@ -55,15 +54,6 @@ async function serve() {
     process.exit(1);
   }
   await import(SERVER_ENTRY);
-}
-
-async function telegram() {
-  if (!existsSync(TELEGRAM_ENTRY)) {
-    console.error(`Telegram bot entry not found at ${TELEGRAM_ENTRY}`);
-    console.error(`The haiflow package may be incomplete — try reinstalling.`);
-    process.exit(1);
-  }
-  await import(TELEGRAM_ENTRY);
 }
 
 async function github() {
@@ -286,7 +276,6 @@ Usage: haiflow <command> [options]
 
 Commands:
   serve                          Run the haiflow server (this process)
-  telegram                       Run the Telegram bot bridge (this process)
   github                         Run the GitHub webhook bridge (this process)
   setup                          Install Claude Code hooks
   init [dir] [--session name]    One-shot onboarding: hooks + session + smoke test
@@ -306,10 +295,7 @@ Options:
 
 Environment:
   PORT                        Server port (default: 3333)
-  HAIFLOW_API_KEY             Bearer token (required by the telegram bot)
-  TELEGRAM_BOT_TOKEN          Bot token from @BotFather (required by telegram)
-  TELEGRAM_SESSION            Session the bot drives (default: "default")
-  TELEGRAM_ALLOWED_CHAT_IDS   Comma-separated chat allowlist (recommended)
+  HAIFLOW_API_KEY             Bearer token (required by the server and bridges)
 
 Examples:
   haiflow setup
@@ -317,16 +303,12 @@ Examples:
   haiflow trigger "explain this codebase"
   haiflow trigger "/daily-update" --session worker --id daily-001
   haiflow status worker
-  haiflow sessions
-  haiflow telegram`);
+  haiflow sessions`);
 }
 
 switch (command) {
   case "serve":
     await serve();
-    break;
-  case "telegram":
-    await telegram();
     break;
   case "github":
     await github();

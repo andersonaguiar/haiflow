@@ -441,9 +441,9 @@ export class Haiflow implements INodeType {
 }
 
 /**
- * Sends a prompt then consumes the SSE response stream, mirroring the parser
- * in src/telegram-bot.ts (streamResponse). Returns the final messages joined
- * as text and as an array, or a clear status object for queued/timeout/error.
+ * Sends a prompt then consumes the SSE response stream from
+ * GET /responses/:id/stream. Returns the final messages joined as text and as
+ * an array, or a clear status object for queued/timeout/error.
  */
 async function triggerAndWait(
 	ctx: IExecuteFunctions,
@@ -514,9 +514,9 @@ async function triggerAndWait(
 }
 
 /**
- * Consumes a haiflow SSE stream. Parses event/data blocks split on "\n\n"
- * exactly as src/telegram-bot.ts does. Uses a plain fetch with the bearer
- * header so we can read the response body as a stream.
+ * Consumes a haiflow SSE stream. Parses event/data blocks split on "\n\n".
+ * Uses a plain fetch with the bearer header so we can read the response body
+ * as a stream.
  */
 async function streamResponse(
 	baseUrl: string,
