@@ -1,5 +1,26 @@
 import { test, expect, beforeEach, afterEach, describe } from "bun:test";
-import { EventBus } from "../src/events";
+import { EventBus, nextRetrySchedule } from "../src/events";
+
+describe("nextRetrySchedule (webhook retry backoff)", () => {
+  const NOW = 1_000_000_000_000;
+
+  test("doubles the delay each attempt: 60s, 120s, 240s, 480s", () => {
+    expect(nextRetrySchedule(0, NOW)?.delayMs).toBe(60_000);
+    expect(nextRetrySchedule(1, NOW)?.delayMs).toBe(120_000);
+    expect(nextRetrySchedule(2, NOW)?.delayMs).toBe(240_000);
+    expect(nextRetrySchedule(3, NOW)?.delayMs).toBe(480_000);
+  });
+
+  test("nextRetryAt is now + delay", () => {
+    const s = nextRetrySchedule(1, NOW);
+    expect(s?.nextRetryAt).toBe(new Date(NOW + 120_000).toISOString());
+  });
+
+  test("gives up (null) once 5 attempts are reached", () => {
+    expect(nextRetrySchedule(4, NOW)).toBeNull();
+    expect(nextRetrySchedule(5, NOW)).toBeNull();
+  });
+});
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 

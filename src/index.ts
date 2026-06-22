@@ -6,7 +6,7 @@ import {
   validateStructural,
   isAllowedTranscriptPath, renderTemplate, recoverSessionPatch,
 } from "./utils";
-import { EventBus } from "./events";
+import { EventBus, nextRetrySchedule } from "./events";
 import {
   initLedger, recordTaskStart, recordTaskFinish, queryTasks, getTask,
   extractFromTranscript, usageSince,
@@ -383,6 +383,26 @@ async function deliverToSubscribers(
   }
 }
 
+// The outbound webhook body, shared by first-delivery and the retry loop so the
+// shape can't drift between them.
+function buildWebhookPayload(topic: string, e: { session: string; taskId: string; message: string }) {
+  return {
+    topic,
+    sourceSession: e.session,
+    taskId: e.taskId,
+    message: e.message,
+    publishedAt: new Date().toISOString(),
+  };
+}
+
+function postWebhook(wh: WebhookSubscriber, payload: object): Promise<Response> {
+  return fetch(wh.url, {
+    method: wh.method ?? "POST",
+    headers: { "Content-Type": "application/json", ...wh.headers },
+    body: JSON.stringify(payload),
+  });
+}
+
 async function deliverToWebhooks(
   topic: string,
   topicConfig: TopicConfig,
@@ -396,13 +416,7 @@ async function deliverToWebhooks(
       continue;
     }
 
-    const payload = {
-      topic,
-      sourceSession: event.session,
-      taskId: event.taskId,
-      message: event.message,
-      publishedAt: new Date().toISOString(),
-    };
+    const payload = buildWebhookPayload(topic, event);
 
     // Record the pending delivery BEFORE the fetch can resolve, so the
     // success/failure handler's updateDelivery always finds a row to update
@@ -414,11 +428,7 @@ async function deliverToWebhooks(
     // while this delivery is still "pending" (event status -> "published"); if
     // we never re-finalize, the event stays stuck "published" in the unprocessed
     // set and gets replayed (re-delivered) on the next server restart.
-    fetch(wh.url, {
-      method: wh.method ?? "POST",
-      headers: { "Content-Type": "application/json", ...wh.headers },
-      body: JSON.stringify(payload),
-    }).then(async () => {
+    postWebhook(wh, payload).then(async () => {
       if (eventId) {
         await eventBus.updateDelivery(eventId, whSubscriber, { status: "delivered" });
         await eventBus.finalizeEvent(eventId);
@@ -2160,34 +2170,21 @@ const retryTimer = setInterval(async () => {
     const wh = topicConfig.webhooks?.find((w) => w.url === webhookUrl);
     if (!wh || wh.enabled === false) continue;
 
-    const payload = {
-      topic: retry.topic,
-      sourceSession: retry.sourceSession,
-      taskId: retry.taskId,
-      message: retry.message,
-      publishedAt: new Date().toISOString(),
-    };
+    const payload = buildWebhookPayload(retry.topic, {
+      session: retry.sourceSession, taskId: retry.taskId, message: retry.message,
+    });
 
-    fetch(wh.url, {
-      method: wh.method ?? "POST",
-      headers: { "Content-Type": "application/json", ...wh.headers },
-      body: JSON.stringify(payload),
-    }).then(async () => {
+    postWebhook(wh, payload).then(async () => {
       await eventBus.updateDelivery(retry.eventId, retry.subscriber, { status: "delivered" });
       await eventBus.finalizeEvent(retry.eventId);
       log("info", "pipeline_webhook_retried", { topic: retry.topic, url: wh.url });
     }).catch(async (err) => {
-      const attempts = retry.attempts + 1;
-      if (attempts >= 5) {
-        await eventBus.updateDelivery(retry.eventId, retry.subscriber, { status: "failed", lastError: String(err) });
-      } else {
-        const delay = 60_000 * Math.pow(2, attempts - 1);
-        await eventBus.updateDelivery(retry.eventId, retry.subscriber, {
-          status: "failed",
-          lastError: String(err),
-          nextRetryAt: new Date(Date.now() + delay).toISOString(),
-        });
-      }
+      const schedule = nextRetrySchedule(retry.attempts, Date.now());
+      await eventBus.updateDelivery(retry.eventId, retry.subscriber, {
+        status: "failed",
+        lastError: String(err),
+        ...(schedule ? { nextRetryAt: schedule.nextRetryAt } : {}),
+      });
       await eventBus.finalizeEvent(retry.eventId);
     });
   }

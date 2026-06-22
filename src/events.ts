@@ -37,6 +37,16 @@ export interface WebhookRetry extends DeliveryRecord {
   taskId: string;
 }
 
+// Exponential backoff schedule for a failed webhook delivery. `attempts` is the
+// delivery's count BEFORE this attempt. Returns null to give up (after 5 tries),
+// otherwise the delay and absolute next-retry time. Doubling: 60s, 120s, 240s, 480s.
+export function nextRetrySchedule(attempts: number, nowMs: number): { delayMs: number; nextRetryAt: string } | null {
+  const next = attempts + 1;
+  if (next >= 5) return null;
+  const delayMs = 60_000 * Math.pow(2, next - 1);
+  return { delayMs, nextRetryAt: new Date(nowMs + delayMs).toISOString() };
+}
+
 const EVENT_TTL = 7 * 86_400; // 7 days in seconds
 const MAX_EVENTS = 1000;
 const CONNECT_TIMEOUT_MS = 3000;
