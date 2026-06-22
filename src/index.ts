@@ -4,7 +4,7 @@ import dashboard from "./dashboard/index.html";
 import {
   sanitizeSession, sanitizeId, generateId, tmuxName,
   validateStructural,
-  isAllowedTranscriptPath, renderTemplate,
+  isAllowedTranscriptPath, renderTemplate, recoverSessionPatch,
 } from "./utils";
 import { EventBus } from "./events";
 import {
@@ -1995,9 +1995,8 @@ const server = Bun.serve({
 for (const dir of readdirSync(BASE_DIR).filter((d) => existsSync(`${BASE_DIR}/${d}/state.json`))) {
   if (isTmuxRunning(dir) && getSessionId(dir)) {
     const state = readState(dir);
-    if (state.status === "offline") {
-      writeState(dir, { status: "idle", since: new Date().toISOString() });
-    }
+    const patch = recoverSessionPatch(state, new Date().toISOString());
+    if (patch) writeState(dir, patch);
   }
 }
 

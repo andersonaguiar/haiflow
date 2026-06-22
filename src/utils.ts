@@ -49,6 +49,44 @@ export function isAllowedTranscriptPath(p: string): boolean {
   return TRANSCRIPT_PREFIXES.some((prefix) => resolved.startsWith(prefix + "/"));
 }
 
+// --- Session boot recovery ---
+
+// The subset of session state that boot recovery reasons about.
+export interface RecoverableState {
+  status: string;
+  intervened?: boolean;
+  waiting?: boolean;
+}
+
+export interface SessionRecoverPatch {
+  status?: "idle";
+  since?: string;
+  intervened?: false;
+  waiting?: false;
+  waitingMessage?: undefined;
+  waitingSince?: undefined;
+}
+
+// Compute the state patch to revive a running session at boot. A fresh process
+// has no terminal websocket and no pending Notification, so a leftover
+// `intervened` flag (which pauses queue draining) or `waiting` flag is stale and
+// must be cleared; an "offline" session that is actually running comes back to
+// "idle". Returns null when nothing needs changing.
+export function recoverSessionPatch(state: RecoverableState, now: string): SessionRecoverPatch | null {
+  const patch: SessionRecoverPatch = {};
+  if (state.intervened) patch.intervened = false;
+  if (state.waiting) {
+    patch.waiting = false;
+    patch.waitingMessage = undefined;
+    patch.waitingSince = undefined;
+  }
+  if (state.status === "offline") {
+    patch.status = "idle";
+    patch.since = now;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
 // --- Template rendering ---
 
 export function renderTemplate(template: string, vars: Record<string, string>): string {
