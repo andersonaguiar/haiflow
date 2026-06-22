@@ -34,7 +34,9 @@ const GUARDRAIL_SKILL_NAME = "haiflow-guardrails";
 const TASK_TIMEOUT_SEC = Number(process.env.HAIFLOW_TASK_TIMEOUT_SEC ?? 0) || 0;
 const WAITING_GRACE_MS = (Number(process.env.HAIFLOW_WAITING_GRACE_SEC ?? 120) || 120) * 1000;
 const WATCHDOG_RECOVER = (process.env.HAIFLOW_WATCHDOG_RECOVER ?? "false").toLowerCase() === "true";
-const WATCHDOG_INTERVAL_MS = 15_000;
+// How often the watchdog scans for wedged sessions and reaps timed-out map runs.
+// Configurable mainly so tests can speed it up; 15s is plenty in production.
+const WATCHDOG_INTERVAL_MS = Number(process.env.HAIFLOW_WATCHDOG_INTERVAL_MS ?? 15_000) || 15_000;
 
 // Map-reduce: how many items one /map call may fan out, and how long a run may
 // wait for stragglers before the reducer fires with whatever has come back.
@@ -923,6 +925,9 @@ interface MapRun {
   source?: string;
   createdAt: number;
   reduced: boolean;
+  // taskIds of dispatched shards, so finishMapRun can clear their taskToMap
+  // entries even if some shards never reported (offline/wedged/cancelled).
+  shardTaskIds: string[];
 }
 
 const mapRuns = new Map<string, MapRun>();
@@ -997,6 +1002,9 @@ function collectMapResult(taskId: string, output: string) {
 function finishMapRun(run: MapRun, partial: boolean) {
   if (run.reduced) return;
   run.reduced = true;
+  // Reap any shard->run mappings that never resolved, so a partially-completed
+  // run doesn't leak taskToMap entries forever.
+  for (const taskId of run.shardTaskIds) taskToMap.delete(taskId);
   log(partial ? "warn" : "info", partial ? "map_reduced_partial" : "map_reduced", {
     runId: run.runId, collected: Object.keys(run.collected).length, total: run.total,
   });
@@ -1246,7 +1254,7 @@ const server = Bun.serve({
           : undefined;
 
         const runId = prefixedId("map");
-        const run: MapRun = { runId, pool: poolName, total: items.length, collected: {}, reduce, source: body.source, createdAt: Date.now(), reduced: false };
+        const run: MapRun = { runId, pool: poolName, total: items.length, collected: {}, reduce, source: body.source, createdAt: Date.now(), reduced: false, shardTaskIds: [] };
         mapRuns.set(runId, run);
 
         const dispatched: unknown[] = [];
@@ -1259,6 +1267,7 @@ const server = Bun.serve({
 
           const taskId = generateId();
           taskToMap.set(taskId, { runId, index: i });
+          run.shardTaskIds.push(taskId);
           const member = pickPoolMember(pool.members)!;
           const where = dispatchOrQueue(member.session, prompt, { id: taskId, source: `map:${runId}` });
           dispatched.push({ index: i, taskId, member: member.session, where });

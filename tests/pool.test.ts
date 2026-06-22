@@ -113,3 +113,80 @@ describe("map-reduce", () => {
     expect((await api("/map", "POST", { items: [], pool: "workers", mapTemplate: "x" })).status).toBe(400);
   });
 });
+
+describe("map partial timeout", () => {
+  // Dedicated server with a short map timeout + fast watchdog so a stranded
+  // shard is reaped within the test rather than after 30 minutes.
+  const PT_DIR = "/tmp/haiflow-pool-pt-test";
+  const PT_PORT = 9889;
+  const PT_BASE = `http://localhost:${PT_PORT}`;
+  let proc: ReturnType<typeof Bun.spawn>;
+
+  async function ptApi(path: string, method = "GET", body?: object) {
+    const res = await fetch(`${PT_BASE}${path}`, {
+      method,
+      headers: body ? { ...authHeaders, "Content-Type": "application/json" } : authHeaders,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text() };
+  }
+
+  beforeAll(async () => {
+    if (existsSync(PT_DIR)) rmSync(PT_DIR, { recursive: true });
+    mkdirSync(PT_DIR, { recursive: true });
+    writeFileSync(`${PT_DIR}/pipeline.json`, JSON.stringify({
+      topics: {}, emitters: {}, pools: { workers: { members: ["pw1", "pw2"] } },
+    }));
+    for (const s of ["pw1", "pw2", "pr"]) {
+      const dir = `${PT_DIR}/${s}`;
+      mkdirSync(`${dir}/responses`, { recursive: true });
+      writeFileSync(`${dir}/session-id`, `claude-${s}`);
+      writeFileSync(`${dir}/state.json`, JSON.stringify({ status: "idle", since: new Date().toISOString() }));
+    }
+    proc = Bun.spawn(["bun", "run", "src/index.ts"], {
+      env: {
+        ...process.env, PORT: String(PT_PORT), HAIFLOW_DATA_DIR: PT_DIR,
+        HAIFLOW_API_KEY: TEST_API_KEY, HAIFLOW_GUARDRAILS: "false",
+        HAIFLOW_MAP_TIMEOUT_SEC: "1", HAIFLOW_WATCHDOG_INTERVAL_MS: "300",
+      },
+      stdout: "ignore", stderr: "ignore",
+    });
+    for (let i = 0; i < 50; i++) {
+      try { if ((await fetch(`${PT_BASE}/health`)).ok) return; } catch {}
+      await Bun.sleep(100);
+    }
+    throw new Error("Server failed to start");
+  });
+
+  afterAll(() => {
+    proc?.kill();
+    if (existsSync(PT_DIR)) rmSync(PT_DIR, { recursive: true });
+  });
+
+  test("reducer fires with '(no output)' when a shard never returns", async () => {
+    const map = await ptApi("/map", "POST", {
+      items: ["a", "b"],
+      pool: "workers",
+      mapTemplate: "do {{item}}",
+      reduce: { session: "pr", promptTemplate: "merge:\n{{results}}" },
+    });
+    const runId = map.data.runId;
+
+    // Only shard 0 (pw1) reports; pw2's shard never does.
+    await ptApi("/hooks/stop", "POST", { session_id: "claude-pw1", last_assistant_message: "SHARD_A" });
+
+    // Wait for the run to age past MAP_TIMEOUT_MS (1s) and the watchdog to reap it.
+    let reduced = false;
+    for (let i = 0; i < 40; i++) {
+      const run = await ptApi(`/map/${runId}`);
+      if (run.data.reduced) { reduced = true; break; }
+      await Bun.sleep(200);
+    }
+    expect(reduced).toBe(true);
+
+    const reducer = await ptApi("/status?session=pr");
+    expect(reducer.data.status).toBe("busy");
+    expect(reducer.data.currentPrompt).toContain("SHARD_A");
+    expect(reducer.data.currentPrompt).toContain("(no output)");
+  }, 15000);
+});
