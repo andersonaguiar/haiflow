@@ -23,6 +23,7 @@
     "hooks",
     "README.md",
     "API.md",
+    "SECURITY.md",
     "LICENSE",
     "CLAUDE.md",
     ".env.example"

@@ -176,6 +176,8 @@ cp .env.example .env
 
 ## Authentication
 
+> 🔒 For the full threat model, trust boundaries, defense-in-depth layers, and a hardening checklist, see **[SECURITY.md](SECURITY.md)**.
+
 `HAIFLOW_API_KEY` is required — pick any string you like (e.g. `openssl rand -hex 32`). It's not a third-party key or paid credential, just a secret you define to protect your server.
 
 **Why this matters:** Without auth, anyone who can reach your server could send arbitrary prompts to Claude Code running with full file and git access. That means reading your source code, modifying files, running shell commands, or exfiltrating data — all through a simple HTTP request.
