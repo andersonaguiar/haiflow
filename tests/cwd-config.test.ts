@@ -27,7 +27,7 @@ async function startServer(extraEnv: Record<string, string>): Promise<{ base: st
   activeDataDir = dataDir;
 
   const base = `http://localhost:${port}`;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 150; i++) {
     try {
       const res = await fetch(`${base}/health`);
       if (res.ok) return { base };

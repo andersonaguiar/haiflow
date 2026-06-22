@@ -35,7 +35,7 @@ describe("startup prompt-file sweep", () => {
 
     try {
       let ready = false;
-      for (let i = 0; i < 50; i++) {
+      for (let i = 0; i < 150; i++) {
         try { if ((await fetch(`http://localhost:${PORT}/health`)).ok) { ready = true; break; } } catch {}
         await Bun.sleep(100);
       }

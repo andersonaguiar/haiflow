@@ -39,7 +39,7 @@ beforeAll(async () => {
     env: { ...process.env, PORT: String(TEST_PORT), HAIFLOW_DATA_DIR: TEST_DIR, HAIFLOW_API_KEY: TEST_API_KEY, HAIFLOW_GUARDRAILS: "false" },
     stdout: "ignore", stderr: "ignore",
   });
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 150; i++) {
     try { if ((await fetch(`${BASE}/health`)).ok) return; } catch {}
     await Bun.sleep(100);
   }
@@ -151,7 +151,7 @@ describe("map partial timeout", () => {
       },
       stdout: "ignore", stderr: "ignore",
     });
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 150; i++) {
       try { if ((await fetch(`${PT_BASE}/health`)).ok) return; } catch {}
       await Bun.sleep(100);
     }
@@ -177,7 +177,7 @@ describe("map partial timeout", () => {
 
     // Wait for the run to age past MAP_TIMEOUT_MS (1s) and the watchdog to reap it.
     let reduced = false;
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 150; i++) {
       const run = await ptApi(`/map/${runId}`);
       if (run.data.reduced) { reduced = true; break; }
       await Bun.sleep(200);

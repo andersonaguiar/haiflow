@@ -53,14 +53,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
-      # tmux lets isTmuxRunning behave normally; the live-Claude integration
-      # tests self-skip when the claude CLI is absent (it isn't installed here).
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
       - run: bun install
       - name: Typecheck
         run: bunx tsc --noEmit
+      # No tmux/claude on the runner on purpose: /session/start then fails fast
+      # (409, which the cwd tests tolerate) instead of hanging, and the
+      # live-Claude integration tests self-skip (Bun.which("claude") is null).
+      # Generous per-test timeout: the first server spawn bundles the dashboard
+      # cold, which can exceed the 5s default on a CI runner.
       - name: Run test suite
-        run: bun test
+        run: bun test --timeout 30000
         env:
           REDIS_URL: redis://localhost:6379

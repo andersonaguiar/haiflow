@@ -27,7 +27,7 @@ describe("graceful shutdown", () => {
 
     try {
       let ready = false;
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 150; i++) {
         try {
           const res = await fetch(`${BASE}/health`);
           if (res.ok) { ready = true; break; }

@@ -31,7 +31,7 @@ beforeAll(async () => {
     env: { ...process.env, PORT: String(TEST_PORT), HAIFLOW_DATA_DIR: TEST_DIR, HAIFLOW_API_KEY: TEST_API_KEY, HAIFLOW_GUARDRAILS: "false" },
     stdout: "ignore", stderr: "ignore",
   });
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 150; i++) {
     try { if ((await fetch(`${BASE}/health`)).ok) return; } catch {}
     await Bun.sleep(100);
   }

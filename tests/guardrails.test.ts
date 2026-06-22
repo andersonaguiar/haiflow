@@ -32,7 +32,7 @@ async function startServer(extraEnv: Record<string, string>): Promise<{ base: st
   activeDataDir = dataDir;
 
   const base = `http://localhost:${port}`;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 150; i++) {
     try {
       const res = await fetch(`${base}/health`);
       if (res.ok) return { base, home };
@@ -61,7 +61,7 @@ describe("guardrail skill installation", () => {
     // Boot-time install runs after server_started; poll briefly.
     const targetPath = `${home}/.claude/skills/haiflow-guardrails/SKILL.md`;
     let found = false;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 150; i++) {
       if (existsSync(targetPath)) {
         found = true;
         break;
@@ -90,7 +90,7 @@ describe("guardrail skill installation", () => {
     const targetPath = `${home}/.claude/skills/haiflow-guardrails/SKILL.md`;
 
     // Wait for first install.
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 150; i++) {
       if (existsSync(targetPath)) break;
       await Bun.sleep(100);
     }

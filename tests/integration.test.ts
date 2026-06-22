@@ -78,7 +78,7 @@ beforeAll(async () => {
   });
 
   // Wait for server to be ready
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 150; i++) {
     try {
       const res = await fetch(`${BASE}/health`);
       if (res.ok) return;

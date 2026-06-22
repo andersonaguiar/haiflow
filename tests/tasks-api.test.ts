@@ -51,7 +51,7 @@ beforeAll(async () => {
     stdout: "ignore",
     stderr: "ignore",
   });
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 150; i++) {
     try { if ((await fetch(`${BASE}/health`)).ok) return; } catch {}
     await Bun.sleep(100);
   }
@@ -240,7 +240,7 @@ describe("GET /usage/window alert threshold", () => {
       },
       stdout: "ignore", stderr: "ignore",
     });
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 150; i++) {
       try { if ((await fetch(`${ALERT_BASE}/health`)).ok) break; } catch {}
       await Bun.sleep(100);
     }
