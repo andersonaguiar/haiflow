@@ -360,7 +360,7 @@ Define recipes in `ingest.json` (in `HAIFLOW_DATA_DIR`):
 | `template` | The data view rendered with `fields`. Wrapped in a fixed frame that tells Claude to treat it as untrusted data, not instructions |
 | `instruction` | The trusted, operator-defined instruction, placed outside the untrusted data block |
 
-Verification uses a constant-time compare. Each signature is a one-time nonce (replay returns `409`, requires Redis). Every payload field is treated as hostile: it is wrapped in a `BEGIN/END WEBHOOK DATA` frame, and the operator instruction lives outside it.
+Verification uses a constant-time compare. Each delivery is a one-time nonce: the `github` scheme keys it on the `X-GitHub-Delivery` GUID (so two different events that share an identical body aren't mistaken for one replay), while `stripe`/`hmac-sha256` key it on the signature. A replay returns `409`. Replay protection requires Redis; when Redis is unavailable the gateway fails **closed** with `503` (set `HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS=true` to accept the replay risk and keep serving). Every payload field is treated as hostile: it is wrapped in a `BEGIN/END WEBHOOK DATA` frame, and the operator instruction lives outside it.
 
 ## Pipeline
 

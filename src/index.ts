@@ -73,6 +73,12 @@ function taskDeadline(): string | undefined {
 // and under tmux/OS transport limits. The file-based fallback in sendToTmux handles delivery.
 const MAX_PROMPT_SIZE = 512_000;
 
+// Inbound webhook replay protection (markNonce) needs Redis. When Redis is
+// unavailable we fail CLOSED — reject signed ingest with 503 — so a captured
+// signed webhook can't be replayed without limit. Set this to true only if you
+// knowingly run ingest without Redis and accept that replay risk.
+const INGEST_ALLOW_WITHOUT_REDIS = (process.env.HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS ?? "false").toLowerCase() === "true";
+
 if (!API_KEY) {
   console.error("HAIFLOW_API_KEY is required. Set it in your .env or environment.");
   process.exit(1);
@@ -1270,7 +1276,13 @@ const server = Bun.serve({
         }
 
         // Replay protection: each signature/nonce may be used once (needs Redis).
+        // Fail closed when Redis is down so a captured signed webhook can't be
+        // replayed without limit (override with HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS).
         if (verify.nonce) {
+          if (!eventBus.connected && !INGEST_ALLOW_WITHOUT_REDIS) {
+            log("warn", "ingest_replay_unavailable", { source });
+            return Response.json({ error: "Replay protection unavailable (Redis down)" }, { status: 503 });
+          }
           const fresh = await eventBus.markNonce(`ingest:${source}:${verify.nonce}`, recipe.maxAgeSec ?? 300);
           if (!fresh) {
             log("warn", "ingest_replay", { source });

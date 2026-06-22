@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, existsSync, rmSync } from "fs";
-import { createHmac } from "crypto";
+import { createHmac, randomUUID } from "crypto";
 
 const TEST_PORT = 9884;
 const TEST_DIR = "/tmp/haiflow-ingest-test";
@@ -62,7 +62,9 @@ afterAll(() => {
 
 describe("signed inbound webhook gateway", () => {
   test("valid generic signature triggers a framed, injection-safe prompt", async () => {
-    const raw = JSON.stringify({ issue: { title: "Login is broken" } });
+    // Unique field keeps the signature (and thus the replay nonce) distinct
+    // across runs, so a nonce cached in Redis from a prior run can't 409 this.
+    const raw = JSON.stringify({ issue: { title: "Login is broken" }, _n: randomUUID() });
     const res = await fetch(`${BASE}/ingest/generic`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Haiflow-Signature": hmacHex(GENERIC_SECRET, raw) },
@@ -91,7 +93,7 @@ describe("signed inbound webhook gateway", () => {
   });
 
   test("verifies the GitHub sha256= scheme", async () => {
-    const raw = JSON.stringify({ issue: { title: "Crash on save" } });
+    const raw = JSON.stringify({ issue: { title: "Crash on save" }, _n: randomUUID() });
     const res = await fetch(`${BASE}/ingest/gh`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Hub-Signature-256": "sha256=" + hmacHex(GH_SECRET, raw) },
@@ -121,5 +123,68 @@ describe("signed inbound webhook gateway", () => {
   test("404 for an unknown source", async () => {
     const res = await fetch(`${BASE}/ingest/nope`, { method: "POST", body: "{}" });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("ingest replay protection without Redis", () => {
+  const NR_DIR = "/tmp/haiflow-ingest-noredis-test";
+
+  async function bootIngestServer(port: number, allowWithoutRedis: boolean) {
+    if (existsSync(NR_DIR)) rmSync(NR_DIR, { recursive: true });
+    mkdirSync(`${NR_DIR}/g-worker/responses`, { recursive: true });
+    writeFileSync(`${NR_DIR}/ingest.json`, JSON.stringify({
+      generic: { scheme: "hmac-sha256", secret: GENERIC_SECRET, target: "trigger", session: "g-worker" },
+    }));
+    writeFileSync(`${NR_DIR}/g-worker/session-id`, "claude-g-worker");
+    writeFileSync(`${NR_DIR}/g-worker/state.json`, JSON.stringify({ status: "idle", since: new Date().toISOString() }));
+
+    const proc = Bun.spawn(["bun", "run", "src/index.ts"], {
+      env: {
+        ...process.env, PORT: String(port), HAIFLOW_DATA_DIR: NR_DIR, HAIFLOW_API_KEY: TEST_API_KEY,
+        HAIFLOW_GUARDRAILS: "false",
+        // Point at a port that is never Redis so eventBus.connected stays false.
+        REDIS_URL: "redis://127.0.0.1:1",
+        HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS: allowWithoutRedis ? "true" : "false",
+      },
+      stdout: "ignore", stderr: "ignore",
+    });
+    for (let i = 0; i < 50; i++) {
+      try { if ((await fetch(`http://localhost:${port}/health`)).ok) return proc; } catch {}
+      await Bun.sleep(100);
+    }
+    proc.kill();
+    throw new Error("server failed to start");
+  }
+
+  afterAll(() => { if (existsSync(NR_DIR)) rmSync(NR_DIR, { recursive: true }); });
+
+  test("fails closed with 503 when Redis is unavailable", async () => {
+    const proc = await bootIngestServer(9885, false);
+    try {
+      const raw = JSON.stringify({ issue: { title: "no redis" } });
+      const res = await fetch(`http://localhost:9885/ingest/generic`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Haiflow-Signature": hmacHex(GENERIC_SECRET, raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(503);
+    } finally {
+      proc.kill();
+    }
+  });
+
+  test("HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS=true keeps serving despite Redis being down", async () => {
+    const proc = await bootIngestServer(9886, true);
+    try {
+      const raw = JSON.stringify({ issue: { title: "opted in" } });
+      const res = await fetch(`http://localhost:9886/ingest/generic`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Haiflow-Signature": hmacHex(GENERIC_SECRET, raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      proc.kill();
+    }
   });
 });

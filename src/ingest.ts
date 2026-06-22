@@ -55,7 +55,14 @@ export function verifySignature(recipe: IngestRecipe, rawBody: string, headers: 
   if (recipe.scheme === "github") {
     const header = headers["x-hub-signature-256"] ?? "";
     const expected = "sha256=" + hmacHex(secret, rawBody);
-    return safeEqual(header, expected) ? { ok: true, nonce: header } : { ok: false, reason: "bad signature" };
+    if (!safeEqual(header, expected)) return { ok: false, reason: "bad signature" };
+    // Use the per-delivery GUID as the replay nonce, not the signature. The
+    // signature is deterministic over the body, so two DIFFERENT events with an
+    // identical body would otherwise collide and the second be dropped as a
+    // "replay". The delivery GUID is unique per event (and stable across
+    // GitHub's own retries, so an idempotent retry of the same delivery is still
+    // deduped). Fall back to the signature when the header is absent.
+    return { ok: true, nonce: headers["x-github-delivery"] || header };
   }
 
   if (recipe.scheme === "stripe") {
