@@ -213,3 +213,64 @@ describe("secret redaction on capture", () => {
     expect(resp.data.redactions).toBe(1);
   });
 });
+
+describe("GET /usage/window alert threshold", () => {
+  // The alert threshold is read from HAIFLOW_USAGE_ALERT_TOKENS at boot, so this
+  // needs its own server. One run covers both branches: the seeded session is
+  // over the threshold, an empty session is under it.
+  const ALERT_DIR = "/tmp/haiflow-usage-alert-test";
+  const ALERT_PORT = 9887;
+  const ALERT_BASE = `http://localhost:${ALERT_PORT}`;
+  let proc: ReturnType<typeof Bun.spawn>;
+
+  beforeAll(async () => {
+    if (existsSync(ALERT_DIR)) rmSync(ALERT_DIR, { recursive: true });
+    const dir = `${ALERT_DIR}/u-worker`;
+    mkdirSync(`${dir}/responses`, { recursive: true });
+    writeFileSync(`${dir}/session-id`, "claude-u-worker");
+    writeFileSync(`${dir}/state.json`, JSON.stringify({
+      status: "busy", since: new Date().toISOString(), currentTaskId: "u-task-1", currentPrompt: "work",
+    }));
+
+    proc = Bun.spawn(["bun", "run", "src/index.ts"], {
+      env: {
+        ...process.env, PORT: String(ALERT_PORT), HAIFLOW_DATA_DIR: ALERT_DIR,
+        HAIFLOW_API_KEY: TEST_API_KEY, HAIFLOW_GUARDRAILS: "false",
+        HAIFLOW_USAGE_ALERT_TOKENS: "1000",
+      },
+      stdout: "ignore", stderr: "ignore",
+    });
+    for (let i = 0; i < 50; i++) {
+      try { if ((await fetch(`${ALERT_BASE}/health`)).ok) break; } catch {}
+      await Bun.sleep(100);
+    }
+
+    // Record 1300 tokens (200 in + 100 out + 1000 cache-read) for u-worker.
+    const tpath = writeTranscript("usage-alert");
+    await fetch(`${ALERT_BASE}/hooks/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: "claude-u-worker", transcript_path: tpath }),
+    });
+  });
+
+  afterAll(() => {
+    proc?.kill();
+    if (existsSync(ALERT_DIR)) rmSync(ALERT_DIR, { recursive: true });
+  });
+
+  test("alert=true once the 5h token total crosses the threshold", async () => {
+    const res = await fetch(`${ALERT_BASE}/usage/window?session=u-worker`, { headers: authHeaders });
+    const data = await res.json();
+    expect(data.alertThresholdTokens).toBe(1000);
+    expect(data.windows["5h"].totalTokens).toBeGreaterThanOrEqual(1000);
+    expect(data.alert).toBe(true);
+  });
+
+  test("alert=false when usage is below the threshold", async () => {
+    const res = await fetch(`${ALERT_BASE}/usage/window?session=no-such-session`, { headers: authHeaders });
+    const data = await res.json();
+    expect(data.alertThresholdTokens).toBe(1000);
+    expect(data.alert).toBe(false);
+  });
+});
