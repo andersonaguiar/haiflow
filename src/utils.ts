@@ -116,6 +116,36 @@ export function recoverSessionPatch(state: RecoverableState, now: string): Sessi
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
+// --- Rate limiting ---
+
+export interface RateWindow {
+  count: number;
+  windowStart: number;
+}
+
+// Fixed-window rate limit. Mutates `state` for `key` and returns whether the
+// request is allowed, plus seconds until the window resets when blocked. A
+// limit <= 0 disables it (always allowed). Pure given `now`, so it's testable.
+export function checkRateLimit(
+  state: Map<string, RateWindow>,
+  key: string,
+  now: number,
+  limit: number,
+  windowMs: number,
+): { allowed: boolean; retryAfterSec: number } {
+  if (limit <= 0) return { allowed: true, retryAfterSec: 0 };
+  const w = state.get(key);
+  if (!w || now - w.windowStart >= windowMs) {
+    state.set(key, { count: 1, windowStart: now });
+    return { allowed: true, retryAfterSec: 0 };
+  }
+  if (w.count >= limit) {
+    return { allowed: false, retryAfterSec: Math.max(1, Math.ceil((w.windowStart + windowMs - now) / 1000)) };
+  }
+  w.count++;
+  return { allowed: true, retryAfterSec: 0 };
+}
+
 // --- Template rendering ---
 
 export function renderTemplate(template: string, vars: Record<string, string>): string {

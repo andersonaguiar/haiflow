@@ -275,3 +275,57 @@ describe("ingest replay protection without Redis", () => {
     }
   });
 });
+
+describe("ingest rate limiting", () => {
+  const RL_DIR = "/tmp/haiflow-ingest-rl-test";
+  const RL_PORT = 9890;
+  const RL_BASE = `http://localhost:${RL_PORT}`;
+  let proc: ReturnType<typeof Bun.spawn>;
+
+  // Bad signature is fine: the rate limiter runs before signature verification,
+  // so allowed requests just 401 and the limiter still counts them.
+  const hit = (src: string) => fetch(`${RL_BASE}/ingest/${src}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Haiflow-Signature": "x" },
+    body: "{}",
+  });
+
+  beforeAll(async () => {
+    if (existsSync(RL_DIR)) rmSync(RL_DIR, { recursive: true });
+    mkdirSync(RL_DIR, { recursive: true });
+    writeFileSync(`${RL_DIR}/ingest.json`, JSON.stringify({
+      generic: { scheme: "hmac-sha256", secret: GENERIC_SECRET, target: "trigger", session: "g-worker" },
+      other: { scheme: "hmac-sha256", secret: GENERIC_SECRET, target: "trigger", session: "g-worker" },
+    }));
+    proc = Bun.spawn(["bun", "run", "src/index.ts"], {
+      env: {
+        ...process.env, PORT: String(RL_PORT), HAIFLOW_DATA_DIR: RL_DIR, HAIFLOW_API_KEY: TEST_API_KEY,
+        HAIFLOW_GUARDRAILS: "false", HAIFLOW_INGEST_RATE_PER_MIN: "2",
+      },
+      stdout: "ignore", stderr: "ignore",
+    });
+    for (let i = 0; i < 150; i++) {
+      try { if ((await fetch(`${RL_BASE}/health`)).ok) return; } catch {}
+      await Bun.sleep(100);
+    }
+    throw new Error("server failed to start");
+  });
+
+  afterAll(() => { proc?.kill(); if (existsSync(RL_DIR)) rmSync(RL_DIR, { recursive: true }); });
+
+  test("returns 429 with Retry-After once the per-source limit is exceeded", async () => {
+    const s1 = await hit("generic");
+    const s2 = await hit("generic");
+    const s3 = await hit("generic"); // 3rd in the window -> blocked
+    expect(s1.status).not.toBe(429);
+    expect(s2.status).not.toBe(429);
+    expect(s3.status).toBe(429);
+    expect(Number(s3.headers.get("Retry-After"))).toBeGreaterThan(0);
+  });
+
+  test("each source has its own budget", async () => {
+    // 'generic' is now exhausted, but 'other' is a separate window.
+    const res = await hit("other");
+    expect(res.status).not.toBe(429);
+  });
+});

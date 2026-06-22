@@ -5,6 +5,7 @@ import {
   sanitizeSession, sanitizeId, generateId, prefixedId, tmuxName,
   validateStructural,
   isAllowedTranscriptPath, renderTemplate, recoverSessionPatch,
+  checkRateLimit, type RateWindow,
 } from "./utils";
 import { EventBus, nextRetrySchedule } from "./events";
 import {
@@ -87,6 +88,13 @@ const INGEST_ALLOW_WITHOUT_REDIS = (process.env.HAIFLOW_INGEST_ALLOW_WITHOUT_RED
 // the freshness window. A long TTL bounds how often a captured signed payload
 // can be replayed (default 7 days; raise/lower with care vs Redis memory).
 const INGEST_NONCE_TTL_SEC = Number(process.env.HAIFLOW_INGEST_NONCE_TTL_SEC ?? 604800) || 604800;
+
+// Per-source rate limit for the public, unauthenticated /ingest endpoint
+// (requests per minute). Mitigates replay-flooding and resource abuse. Keyed on
+// the configured source name, so the state map is bounded by the recipe count.
+// Default 120/min; set to 0 to disable.
+const INGEST_RATE_PER_MIN = Number(process.env.HAIFLOW_INGEST_RATE_PER_MIN ?? 120) || 0;
+const ingestRateState = new Map<string, RateWindow>();
 
 // Default age (hours) above which POST /sessions/prune reaps an offline session's
 // state directory. Overridable per-request via the `olderThanHours` body field.
@@ -1324,6 +1332,14 @@ const server = Bun.serve({
         const source = sanitizeSession(req.params.source);
         const recipe = readIngestConfig()[source];
         if (!recipe) return Response.json({ error: "Unknown ingest source" }, { status: 404 });
+
+        // Rate-limit this public, unauthenticated endpoint before doing any real
+        // work (body read, HMAC, dispatch). Keyed on the known source -> bounded.
+        const rl = checkRateLimit(ingestRateState, source, Date.now(), INGEST_RATE_PER_MIN, 60_000);
+        if (!rl.allowed) {
+          log("warn", "ingest_rate_limited", { source });
+          return Response.json({ error: "Rate limit exceeded" }, { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } });
+        }
 
         const rawBody = await req.text();
         if (rawBody.length > MAX_PROMPT_SIZE) return Response.json({ error: "payload too large" }, { status: 413 });

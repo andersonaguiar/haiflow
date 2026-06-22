@@ -1,5 +1,36 @@
 import { test, expect, describe } from "bun:test";
-import { recoverSessionPatch, prefixedId, generateId } from "../src/utils";
+import { recoverSessionPatch, prefixedId, generateId, checkRateLimit, type RateWindow } from "../src/utils";
+
+describe("checkRateLimit (fixed-window)", () => {
+  test("allows up to the limit, then blocks", () => {
+    const state = new Map<string, RateWindow>();
+    expect(checkRateLimit(state, "s", 1000, 2, 60_000).allowed).toBe(true);
+    expect(checkRateLimit(state, "s", 1000, 2, 60_000).allowed).toBe(true);
+    const blocked = checkRateLimit(state, "s", 1000, 2, 60_000);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterSec).toBeGreaterThan(0);
+  });
+
+  test("resets once the window elapses", () => {
+    const state = new Map<string, RateWindow>();
+    checkRateLimit(state, "s", 1000, 1, 60_000); // uses the slot
+    expect(checkRateLimit(state, "s", 1000, 1, 60_000).allowed).toBe(false);
+    // 60s later -> new window
+    expect(checkRateLimit(state, "s", 61_001, 1, 60_000).allowed).toBe(true);
+  });
+
+  test("tracks keys independently", () => {
+    const state = new Map<string, RateWindow>();
+    expect(checkRateLimit(state, "a", 0, 1, 60_000).allowed).toBe(true);
+    expect(checkRateLimit(state, "a", 0, 1, 60_000).allowed).toBe(false);
+    expect(checkRateLimit(state, "b", 0, 1, 60_000).allowed).toBe(true);
+  });
+
+  test("limit <= 0 disables the limit", () => {
+    const state = new Map<string, RateWindow>();
+    for (let i = 0; i < 5; i++) expect(checkRateLimit(state, "s", 0, 0, 60_000).allowed).toBe(true);
+  });
+});
 
 describe("prefixedId", () => {
   test("uses the given prefix and the <prefix>_<ms>_<6 chars> shape", () => {
