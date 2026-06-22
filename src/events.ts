@@ -40,43 +40,57 @@ const EVENT_TTL = 7 * 86_400; // 7 days in seconds
 const MAX_EVENTS = 1000;
 const CONNECT_TIMEOUT_MS = 3000;
 
+function logRedis(level: "info" | "warn" | "error", event: string, data?: Record<string, unknown>) {
+  const entry = JSON.stringify({ ts: new Date().toISOString(), level, event, ...data });
+  if (level === "error") console.error(entry);
+  else console.log(entry);
+}
+
 // --- EventBus ---
 
 export class EventBus {
   private redis: RedisClient;
-  // false when Redis is unreachable. Methods short-circuit to safe defaults
-  // so the rest of the server (HTTP API, sessions, queues) keeps working.
-  // Pipeline events become fire-and-forget — no persistence, no retry.
-  public readonly connected: boolean;
 
-  private constructor(redisUrl: string, connected: boolean) {
+  // Live connection state, delegated to the auto-reconnecting client rather than
+  // a one-shot boot probe. When false, methods short-circuit to safe defaults so
+  // the rest of the server (HTTP API, sessions, queues) keeps working and
+  // pipeline events become fire-and-forget. Because it tracks the real client,
+  // persistence / retry / replay-protection self-heal once Redis comes back,
+  // instead of staying disabled until a full restart.
+  get connected(): boolean {
+    return this.redis.connected;
+  }
+
+  private constructor(redisUrl: string) {
     this.redis = new RedisClient(redisUrl);
-    this.connected = connected;
+    this.redis.onconnect = () => logRedis("info", "redis_connected", { url: redisUrl });
+    this.redis.onclose = (err) =>
+      logRedis("warn", "redis_disconnected", { url: redisUrl, error: err?.message });
   }
 
   static async create(redisUrl: string): Promise<EventBus> {
-    const probe = new RedisClient(redisUrl);
+    const bus = new EventBus(redisUrl);
+    // Probe the real client so `connected` reflects reality at boot, but never
+    // block longer than CONNECT_TIMEOUT_MS. The .catch stops a slow rejection
+    // from becoming an unhandled rejection after the timeout wins the race;
+    // autoReconnect will keep trying in the background regardless.
+    const connect = bus.redis.connect().catch(() => {});
     try {
       await Promise.race([
-        probe.connect(),
+        connect,
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error("redis connect timeout")), CONNECT_TIMEOUT_MS)
         ),
       ]);
-      probe.close();
-      return new EventBus(redisUrl, true);
+      if (!bus.redis.connected) throw new Error("redis not connected");
     } catch (err) {
-      probe.close();
-      console.error(JSON.stringify({
-        ts: new Date().toISOString(),
-        level: "warn",
-        event: "redis_unavailable",
+      logRedis("warn", "redis_unavailable", {
         url: redisUrl,
         error: err instanceof Error ? err.message : String(err),
-        note: "Pipeline events fall back to direct dispatch — no persistence or retry.",
-      }));
-      return new EventBus(redisUrl, false);
+        note: "Pipeline events fall back to direct dispatch (no persistence or retry) until Redis is reachable.",
+      });
     }
+    return bus;
   }
 
   /** Record a new event. Returns the event ID. */
@@ -365,9 +379,8 @@ export class EventBus {
     }
   }
 
-  /** Close the Redis connection. */
+  /** Close the Redis connection (and stop auto-reconnect). */
   close() {
-    if (!this.connected) return;
-    this.redis.close();
+    try { this.redis.close(); } catch {}
   }
 }

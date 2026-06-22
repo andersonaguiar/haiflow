@@ -15,6 +15,32 @@ afterEach(async () => {
   bus.close();
 });
 
+describe("EventBus no-Redis fallback", () => {
+  test("degrades safely when Redis is unreachable", async () => {
+    // Port 1 is never a Redis server, so the client cannot connect.
+    const offline = await EventBus.create("redis://127.0.0.1:1");
+    try {
+      // The getter delegates to the live client, so it reports the real state.
+      expect(offline.connected).toBe(false);
+
+      // recordEvent still returns a usable evt_ id so caller code is unaffected,
+      // but nothing is persisted.
+      const id = await offline.recordEvent({
+        topic: "t", message: "m", sourceSession: "s", taskId: "task_1",
+      });
+      expect(id).toStartWith("evt_");
+      expect(await offline.getRecentEvents()).toEqual([]);
+      expect(await offline.getUnprocessedEvents()).toEqual([]);
+
+      // Replay protection is skipped (markNonce returns true = "newly seen,
+      // proceed") because there is no store to dedupe against.
+      expect(await offline.markNonce("nonce-1", 60)).toBe(true);
+    } finally {
+      offline.close();
+    }
+  });
+});
+
 describe("EventBus", () => {
   // --- recordEvent ---
 
