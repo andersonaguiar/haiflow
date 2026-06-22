@@ -672,7 +672,18 @@ function saveResponse(session: string, taskId: string, prompt?: string, transcri
       ...(r.count > 0 ? { redactions: r.count } : {}),
     }, null, 2));
     log("info", "response_saved", { session, taskId, source: "fallback", redactions: r.count });
+    return;
   }
+
+  // Neither the transcript nor a last_assistant_message yielded text (e.g. the
+  // task ended on tool calls with no trailing prose, or jq is unavailable).
+  // Still write a definitive completion so pollers on /responses/:id and SSE
+  // streams see the task finish instead of hanging until their timeout (which
+  // surfaces to chat/GitHub bridges as a false "still working" reply).
+  writeFileSync(file, JSON.stringify({
+    id: taskId, completed_at: new Date().toISOString(), prompt, messages: ["(no text output)"],
+  }, null, 2));
+  log("info", "response_saved", { session, taskId, source: "empty" });
 }
 
 function drainQueue(session: string) {

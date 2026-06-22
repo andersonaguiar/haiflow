@@ -497,6 +497,32 @@ describe("POST /hooks/stop (known session)", () => {
     expect(resp.messages).toEqual(["I finished the work."]);
   });
 
+  test("writes a definitive completion when there is no transcript or last message", async () => {
+    const session = "hook-stop-empty";
+    const claudeId = "claude-stop-empty-id";
+    const dir = `${TEST_DIR}/${session}`;
+    mkdirSync(`${dir}/responses`, { recursive: true });
+    writeFileSync(`${dir}/session-id`, claudeId);
+    writeFileSync(
+      `${dir}/state.json`,
+      JSON.stringify({
+        status: "busy",
+        since: new Date().toISOString(),
+        currentTaskId: "stop-empty-001",
+      })
+    );
+
+    // No transcript_path and no last_assistant_message: the task ended with no
+    // trailing text. A response file must still be written, or pollers and SSE
+    // streams hang until timeout.
+    const { data } = await api("/hooks/stop", "POST", { session_id: claudeId });
+    expect(data.ok).toBe(true);
+
+    const { status, data: resp } = await api(`/responses/stop-empty-001?session=${session}`);
+    expect(status).toBe(200);
+    expect(resp.messages).toEqual(["(no text output)"]);
+  });
+
   test("drains queue after stop", async () => {
     const session = "hook-drain";
     const claudeId = "claude-drain-test-id";
