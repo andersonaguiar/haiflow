@@ -838,6 +838,14 @@ async function startClaudeSession(session: string, cwd: string): Promise<{ succe
     return { success: true };
   }
 
+  // Fail fast (and clearly) if the Claude CLI isn't installed. Otherwise tmux
+  // happily starts a session that never becomes interactive, and we'd block on
+  // the readiness + guardrail waits (~45s) before "succeeding" into a dead pane.
+  if (!Bun.which("claude")) {
+    log("error", "session_start_failed", { session, error: "claude CLI not found on PATH" });
+    return { success: false, error: "claude CLI not found on PATH" };
+  }
+
   const result = Bun.spawnSync([
     "tmux", "new-session", "-d", "-s", tmuxName(session), "-c", cwd,
     "-e", `HAIFLOW=1`,
