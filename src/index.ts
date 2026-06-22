@@ -1,4 +1,5 @@
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync, statSync, renameSync } from "fs";
+import type { ServerWebSocket, Subprocess } from "bun";
 import dashboard from "./dashboard/index.html";
 import {
   sanitizeSession, sanitizeId, generateId, tmuxName,
@@ -948,6 +949,15 @@ function finishMapRun(run: MapRun, partial: boolean) {
   dispatchOrQueue(run.reduce.session, prompt, { id: reduceTaskId, source: `map:${run.runId}` });
 }
 
+// Data carried on each take-the-wheel terminal WebSocket. Typing this lets Bun
+// infer the upgrade data type and keeps ws.data.* fully checked.
+interface TerminalWSData {
+  session: string;
+  control: boolean;
+  proc?: Subprocess<"pipe" | "ignore", "pipe", "ignore">;
+  reader?: ReadableStreamDefaultReader<Uint8Array>;
+}
+
 const server = Bun.serve({
   port: PORT,
   routes: {
@@ -1894,8 +1904,8 @@ const server = Bun.serve({
   },
 
   websocket: {
-    open(ws: any) {
-      const session = ws.data.session as string;
+    open(ws: ServerWebSocket<TerminalWSData>) {
+      const session = ws.data.session;
       const control = !!ws.data.control;
       const target = tmuxName(session);
 
@@ -1923,6 +1933,7 @@ const server = Bun.serve({
 
       // Stream tmux output to the WebSocket via explicit reader
       const reader = proc.stdout.getReader();
+      ws.data.reader = reader;
       (async () => {
         try {
           while (true) {
@@ -1944,7 +1955,7 @@ const server = Bun.serve({
       log("info", "terminal_ws_opened", { session });
     },
 
-    message(ws: any, msg: any) {
+    message(ws: ServerWebSocket<TerminalWSData>, msg: string | Buffer) {
       // Only control-mode sockets accept input; view-mode ignores it.
       if (!ws.data.control) return;
       const stdin = ws.data.proc?.stdin;
@@ -1957,8 +1968,11 @@ const server = Bun.serve({
       }
     },
 
-    close(ws: any) {
-      const session = ws.data.session as string;
+    close(ws: ServerWebSocket<TerminalWSData>) {
+      const session = ws.data.session;
+      // Release the stdout reader lock so the killed PTY's stream can be
+      // collected instead of leaving a locked stream + zombie `script` process.
+      try { ws.data.reader?.cancel(); } catch {}
       try { ws.data.proc?.kill(); } catch {}
       if (ws.data.control) {
         writeState(session, { intervened: false });

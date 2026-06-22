@@ -242,7 +242,8 @@ export class EventBus {
     const deliveries: DeliveryRecord[] = [];
     if (Array.isArray(raw)) {
       for (let i = 1; i < raw.length; i += 2) {
-        deliveries.push(JSON.parse(raw[i]));
+        const value = (raw as unknown[])[i];
+        if (typeof value === "string") deliveries.push(JSON.parse(value));
       }
     } else if (typeof raw === "object") {
       for (const value of Object.values(raw as Record<string, string>)) {
@@ -264,6 +265,7 @@ export class EventBus {
     const retries: WebhookRetry[] = [];
     for (const member of members) {
       const [eventId, subscriber] = member.split("|");
+      if (!eventId || !subscriber) continue;
       const fields = await this.redis.hmget(`haiflow:deliveries:${eventId}`, [subscriber]);
       const deliveryRaw = fields?.[0];
       if (!deliveryRaw) continue;

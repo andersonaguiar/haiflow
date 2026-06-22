@@ -518,7 +518,9 @@ describe("pipeline webhooks", () => {
       routes: {
         "/hook": {
           POST: async (req) => {
-            receivedHeaders = Object.fromEntries(req.headers.entries());
+            req.headers.forEach((value, key) => {
+              receivedHeaders[key] = value;
+            });
             return Response.json({ ok: true });
           },
         },

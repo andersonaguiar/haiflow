@@ -39,13 +39,13 @@ describe("EventBus", () => {
 
     const events = await bus.getRecentEvents();
     expect(events).toHaveLength(1);
-    expect(events[0].topic).toBe("test.done");
-    expect(events[0].message).toBe("result");
-    expect(events[0].sourceSession).toBe("agent-1");
-    expect(events[0].taskId).toBe("task_123");
-    expect(events[0].chain).toEqual(["agent-0"]);
-    expect(events[0].status).toBe("published");
-    expect(events[0].publishedAt).toBeTruthy();
+    expect(events[0]!.topic).toBe("test.done");
+    expect(events[0]!.message).toBe("result");
+    expect(events[0]!.sourceSession).toBe("agent-1");
+    expect(events[0]!.taskId).toBe("task_123");
+    expect(events[0]!.chain).toEqual(["agent-0"]);
+    expect(events[0]!.status).toBe("published");
+    expect(events[0]!.publishedAt).toBeTruthy();
   });
 
   test("recordEvent defaults chain to empty array", async () => {
@@ -57,7 +57,7 @@ describe("EventBus", () => {
     });
 
     const events = await bus.getRecentEvents();
-    expect(events[0].chain).toEqual([]);
+    expect(events[0]!.chain).toEqual([]);
   });
 
   // --- getRecentEvents ---
@@ -67,8 +67,8 @@ describe("EventBus", () => {
     await bus.recordEvent({ topic: "b", message: "second", sourceSession: "s", taskId: "t2" });
 
     const events = await bus.getRecentEvents();
-    expect(events[0].topic).toBe("b");
-    expect(events[1].topic).toBe("a");
+    expect(events[0]!.topic).toBe("b");
+    expect(events[1]!.topic).toBe("a");
   });
 
   test("getRecentEvents respects limit", async () => {
@@ -88,12 +88,12 @@ describe("EventBus", () => {
 
     const deliveries = await bus.getDeliveries(eventId);
     expect(deliveries).toHaveLength(1);
-    expect(deliveries[0].eventId).toBe(eventId);
-    expect(deliveries[0].subscriber).toBe("worker");
-    expect(deliveries[0].type).toBe("session");
-    expect(deliveries[0].status).toBe("queued");
-    expect(deliveries[0].attempts).toBe(1);
-    expect(deliveries[0].createdAt).toBeTruthy();
+    expect(deliveries[0]!.eventId).toBe(eventId);
+    expect(deliveries[0]!.subscriber).toBe("worker");
+    expect(deliveries[0]!.type).toBe("session");
+    expect(deliveries[0]!.status).toBe("queued");
+    expect(deliveries[0]!.attempts).toBe(1);
+    expect(deliveries[0]!.createdAt).toBeTruthy();
   });
 
   test("recordDelivery sets deliveredAt for delivered status", async () => {
@@ -101,7 +101,7 @@ describe("EventBus", () => {
     await bus.recordDelivery(eventId, "worker", "session", "delivered");
 
     const deliveries = await bus.getDeliveries(eventId);
-    expect(deliveries[0].deliveredAt).toBeTruthy();
+    expect(deliveries[0]!.deliveredAt).toBeTruthy();
   });
 
   test("recordDelivery does not set deliveredAt for pending status", async () => {
@@ -109,8 +109,8 @@ describe("EventBus", () => {
     await bus.recordDelivery(eventId, "webhook:http://example.com", "webhook", "pending");
 
     const deliveries = await bus.getDeliveries(eventId);
-    expect(deliveries[0].deliveredAt).toBeNull();
-    expect(deliveries[0].attempts).toBe(0);
+    expect(deliveries[0]!.deliveredAt).toBeNull();
+    expect(deliveries[0]!.attempts).toBe(0);
   });
 
   // --- updateDelivery ---
@@ -122,9 +122,9 @@ describe("EventBus", () => {
     await bus.updateDelivery(eventId, "webhook:http://x.com", { status: "delivered" });
 
     const deliveries = await bus.getDeliveries(eventId);
-    expect(deliveries[0].status).toBe("delivered");
-    expect(deliveries[0].attempts).toBe(1);
-    expect(deliveries[0].deliveredAt).toBeTruthy();
+    expect(deliveries[0]!.status).toBe("delivered");
+    expect(deliveries[0]!.attempts).toBe(1);
+    expect(deliveries[0]!.deliveredAt).toBeTruthy();
   });
 
   test("updateDelivery stores error and retry time", async () => {
@@ -139,9 +139,9 @@ describe("EventBus", () => {
     });
 
     const deliveries = await bus.getDeliveries(eventId);
-    expect(deliveries[0].status).toBe("failed");
-    expect(deliveries[0].lastError).toBe("connection refused");
-    expect(deliveries[0].nextRetryAt).toBe(retryAt);
+    expect(deliveries[0]!.status).toBe("failed");
+    expect(deliveries[0]!.lastError).toBe("connection refused");
+    expect(deliveries[0]!.nextRetryAt).toBe(retryAt);
   });
 
   // --- finalizeEvent ---
@@ -155,7 +155,7 @@ describe("EventBus", () => {
     await bus.finalizeEvent(eventId);
 
     const events = await bus.getRecentEvents();
-    expect(events[0].status).toBe("delivered");
+    expect(events[0]!.status).toBe("delivered");
   });
 
   test("finalizeEvent sets partial when some failed", async () => {
@@ -167,7 +167,7 @@ describe("EventBus", () => {
     await bus.finalizeEvent(eventId);
 
     const events = await bus.getRecentEvents();
-    expect(events[0].status).toBe("partial");
+    expect(events[0]!.status).toBe("partial");
   });
 
   test("finalizeEvent sets failed when all failed", async () => {
@@ -180,7 +180,7 @@ describe("EventBus", () => {
     await bus.finalizeEvent(eventId);
 
     const events = await bus.getRecentEvents();
-    expect(events[0].status).toBe("failed");
+    expect(events[0]!.status).toBe("failed");
   });
 
   test("finalizeEvent stays published when deliveries pending", async () => {
@@ -190,7 +190,7 @@ describe("EventBus", () => {
     await bus.finalizeEvent(eventId);
 
     const events = await bus.getRecentEvents();
-    expect(events[0].status).toBe("published");
+    expect(events[0]!.status).toBe("published");
   });
 
   test("finalizeEvent sets delivered when no deliveries", async () => {
@@ -199,7 +199,7 @@ describe("EventBus", () => {
     await bus.finalizeEvent(eventId);
 
     const events = await bus.getRecentEvents();
-    expect(events[0].status).toBe("delivered");
+    expect(events[0]!.status).toBe("delivered");
   });
 
   // --- getPendingWebhookRetries ---
@@ -217,8 +217,8 @@ describe("EventBus", () => {
 
     const retries = await bus.getPendingWebhookRetries();
     expect(retries).toHaveLength(1);
-    expect(retries[0].topic).toBe("calc.done");
-    expect(retries[0].message).toBe("4");
+    expect(retries[0]!.topic).toBe("calc.done");
+    expect(retries[0]!.message).toBe("4");
   });
 
   test("getPendingWebhookRetries excludes future retries", async () => {
@@ -263,7 +263,7 @@ describe("EventBus", () => {
 
     const unprocessed = await bus.getUnprocessedEvents();
     expect(unprocessed).toHaveLength(1);
-    expect(unprocessed[0].topic).toBe("a");
+    expect(unprocessed[0]!.topic).toBe("a");
   });
 
   test("getUnprocessedEvents returns oldest first", async () => {
@@ -271,8 +271,8 @@ describe("EventBus", () => {
     await bus.recordEvent({ topic: "b", message: "2", sourceSession: "s", taskId: "t2" });
 
     const unprocessed = await bus.getUnprocessedEvents();
-    expect(unprocessed[0].topic).toBe("a");
-    expect(unprocessed[1].topic).toBe("b");
+    expect(unprocessed[0]!.topic).toBe("a");
+    expect(unprocessed[1]!.topic).toBe("b");
   });
 
   // --- prune ---
