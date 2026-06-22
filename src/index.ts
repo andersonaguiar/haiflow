@@ -339,15 +339,16 @@ async function deliverToSubscribers(
   }
 }
 
-function deliverToWebhooks(
+async function deliverToWebhooks(
   topic: string,
   topicConfig: TopicConfig,
   event: { session: string; taskId: string; message: string },
   eventId?: string
 ) {
   for (const wh of topicConfig.webhooks ?? []) {
+    const whSubscriber = `webhook:${wh.url}`;
     if (wh.enabled === false) {
-      if (eventId) eventBus.recordDelivery(eventId, `webhook:${wh.url}`, "webhook", "skipped");
+      if (eventId) await eventBus.recordDelivery(eventId, whSubscriber, "webhook", "skipped");
       continue;
     }
 
@@ -359,15 +360,25 @@ function deliverToWebhooks(
       publishedAt: new Date().toISOString(),
     };
 
-    if (eventId) eventBus.recordDelivery(eventId, `webhook:${wh.url}`, "webhook", "pending");
+    // Record the pending delivery BEFORE the fetch can resolve, so the
+    // success/failure handler's updateDelivery always finds a row to update
+    // (otherwise the HSET could land after the update and the transition is lost).
+    if (eventId) await eventBus.recordDelivery(eventId, whSubscriber, "webhook", "pending");
 
-    const whSubscriber = `webhook:${wh.url}`;
+    // Fire the POST without blocking the caller on slow webhooks, but
+    // re-finalize the event once it resolves. handlePipelineEvent finalizes
+    // while this delivery is still "pending" (event status -> "published"); if
+    // we never re-finalize, the event stays stuck "published" in the unprocessed
+    // set and gets replayed (re-delivered) on the next server restart.
     fetch(wh.url, {
       method: wh.method ?? "POST",
       headers: { "Content-Type": "application/json", ...wh.headers },
       body: JSON.stringify(payload),
     }).then(async () => {
-      if (eventId) await eventBus.updateDelivery(eventId, whSubscriber, { status: "delivered" });
+      if (eventId) {
+        await eventBus.updateDelivery(eventId, whSubscriber, { status: "delivered" });
+        await eventBus.finalizeEvent(eventId);
+      }
       log("info", "pipeline_webhook_sent", { topic, url: wh.url });
     }).catch(async (err) => {
       if (eventId) {
@@ -377,6 +388,7 @@ function deliverToWebhooks(
           lastError: String(err),
           nextRetryAt: nextRetry,
         });
+        await eventBus.finalizeEvent(eventId);
       }
       log("error", "pipeline_webhook_failed", { topic, url: wh.url, error: String(err) });
     });
@@ -406,7 +418,7 @@ async function handlePipelineEvent(
   const chain = [...(event.chain ?? []), event.session];
 
   await deliverToSubscribers(topic, topicConfig, event, chain, eventId);
-  deliverToWebhooks(topic, topicConfig, event, eventId);
+  await deliverToWebhooks(topic, topicConfig, event, eventId);
 
   if (eventId) await eventBus.finalizeEvent(eventId);
 }
