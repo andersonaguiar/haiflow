@@ -486,6 +486,28 @@ describe("malformed request bodies", () => {
   });
 });
 
+describe("POST /sessions/prune", () => {
+  test("reaps stale offline sessions, keeps recent and non-offline ones", async () => {
+    const old = new Date(Date.now() - 48 * 3_600_000).toISOString();
+    const fresh = new Date().toISOString();
+    writeState("prune-old", { status: "offline", since: old });
+    writeState("prune-recent", { status: "offline", since: fresh });
+    writeState("prune-idle", { status: "idle", since: old });
+
+    const { status, data } = await api("/sessions/prune", "POST", {});
+    expect(status).toBe(200);
+    expect(data.pruned).toContain("prune-old");
+    expect(data.pruned).not.toContain("prune-recent");
+    expect(data.pruned).not.toContain("prune-idle");
+
+    const { data: list } = await api("/sessions");
+    const names = list.map((s: any) => s.session);
+    expect(names).not.toContain("prune-old");
+    expect(names).toContain("prune-recent");
+    expect(names).toContain("prune-idle");
+  });
+});
+
 describe("POST /hooks/stop", () => {
   test("returns ok for unknown session", async () => {
     const { data } = await api("/hooks/stop", "POST", {

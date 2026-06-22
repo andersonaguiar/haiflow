@@ -259,6 +259,17 @@ async function sessions() {
   }
 }
 
+async function prune() {
+  const hours = flag("older-than-hours");
+  const body = hours ? { olderThanHours: Number(hours) } : {};
+  const data = await api("/sessions/prune", "POST", body);
+  if (data.count === 0) {
+    console.log(`No stale offline sessions (older than ${data.ttlHours}h)`);
+    return;
+  }
+  console.log(`Pruned ${data.count} session(s): ${data.pruned.join(", ")}`);
+}
+
 async function responses() {
   const id = args[1];
   const session = flag("session") || "default";
@@ -294,6 +305,7 @@ Commands:
   trigger <prompt>               Send a prompt to Claude
   status [session]               Check session status
   sessions                       List all sessions
+  prune [--older-than-hours N]   Remove stale offline sessions
   responses [id]                 Get responses
   version                        Print the haiflow version
 
@@ -346,6 +358,9 @@ switch (command) {
     break;
   case "sessions":
     await sessions();
+    break;
+  case "prune":
+    await prune();
     break;
   case "responses":
     await responses();

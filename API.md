@@ -37,6 +37,17 @@ curl -X POST http://localhost:3333/session/remove \
   -d '{"session": "worker"}'
 ```
 
+## `POST /sessions/prune`
+
+Bulk-remove offline sessions whose state directory is older than a TTL (default `HAIFLOW_SESSION_TTL_HOURS`, 24h). Idle/busy and recently-offline sessions are kept. Pass `{"olderThanHours": N}` to override. Returns `{ pruned: [...], count, ttlHours }`. Also available as `haiflow prune`.
+
+```bash
+curl -X POST http://localhost:3333/sessions/prune \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"olderThanHours": 48}'
+```
+
 ## `POST /interrupt`
 
 Send a control key into a running session's TUI, optionally followed by a steering prompt. Use it to unstick a session wedged on a permission prompt, or to redirect a running agent.

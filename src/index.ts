@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync, statSync, renameSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync, statSync, renameSync, rmSync } from "fs";
 import type { ServerWebSocket, Subprocess } from "bun";
 import dashboard from "./dashboard/index.html";
 import {
@@ -78,6 +78,10 @@ const MAX_PROMPT_SIZE = 512_000;
 // signed webhook can't be replayed without limit. Set this to true only if you
 // knowingly run ingest without Redis and accept that replay risk.
 const INGEST_ALLOW_WITHOUT_REDIS = (process.env.HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS ?? "false").toLowerCase() === "true";
+
+// Default age (hours) above which POST /sessions/prune reaps an offline session's
+// state directory. Overridable per-request via the `olderThanHours` body field.
+const SESSION_TTL_HOURS = Number(process.env.HAIFLOW_SESSION_TTL_HOURS ?? 24) || 24;
 
 // Build version + boot time, surfaced at GET /version so operators can confirm
 // which build a remote haiflow is running across the npm/install.sh/n8n paths.
@@ -648,6 +652,21 @@ function sendToTmux(session: string, prompt: string): boolean {
   }
 
   return typeThenSubmit(target, fullPrompt);
+}
+
+// Large-prompt temp files (above) are normally removed by a 60s timer, but that
+// timer is lost on crash/restart, leaking plaintext prompts in /tmp. Sweep any
+// leftovers on boot. Returns the number removed.
+function sweepStalePromptFiles(): number {
+  let removed = 0;
+  try {
+    for (const f of readdirSync("/tmp")) {
+      if (f.startsWith("haiflow-prompt-") && f.endsWith(".txt")) {
+        try { unlinkSync(`/tmp/${f}`); removed++; } catch {}
+      }
+    }
+  } catch {}
+  return removed;
 }
 
 // tmux treats `send-keys "<text>" Enter` as one paste block — Enter becomes
@@ -1892,11 +1911,33 @@ const server = Bun.serve({
 
         const dir = `${BASE_DIR}/${session}`;
         if (existsSync(dir)) {
-          const { rmSync } = await import("fs");
           rmSync(dir, { recursive: true });
         }
         log("info", "session_removed", { session });
         return Response.json({ removed: true, session });
+      }),
+    },
+
+    // Bulk-reap stale OFFLINE sessions whose state dir would otherwise linger
+    // forever and add per-tick scan cost. Only offline sessions older than the
+    // TTL are removed; idle/busy sessions and recently-offline ones are kept.
+    "/sessions/prune": {
+      POST: authed(async (req) => {
+        const body = (await readJson(req)) ?? {};
+        const ttlHours = Number(body.olderThanHours ?? SESSION_TTL_HOURS) || SESSION_TTL_HOURS;
+        const cutoff = Date.now() - ttlHours * 3_600_000;
+        const pruned: string[] = [];
+        for (const { session, status } of listSessions()) {
+          if (status !== "offline") continue;
+          const since = Date.parse(readState(session).since ?? "");
+          if (Number.isFinite(since) && since > cutoff) continue; // too recent
+          try {
+            rmSync(`${BASE_DIR}/${session}`, { recursive: true });
+            pruned.push(session);
+          } catch {}
+        }
+        log("info", "sessions_pruned", { count: pruned.length, ttlHours });
+        return Response.json({ pruned, count: pruned.length, ttlHours });
       }),
     },
 
@@ -2074,6 +2115,9 @@ for (const dir of readdirSync(BASE_DIR).filter((d) => existsSync(`${BASE_DIR}/${
     if (patch) writeState(dir, patch);
   }
 }
+
+const sweptPrompts = sweepStalePromptFiles();
+if (sweptPrompts > 0) log("info", "stale_prompts_swept", { count: sweptPrompts });
 
 log("info", "server_started", { port: server.port, auth: !!API_KEY });
 log("info", "sessions_recovered", { sessions: listSessions() });
