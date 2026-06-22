@@ -1,4 +1,5 @@
 import { resolve } from "path";
+import { realpathSync, statSync } from "fs";
 
 // --- Input sanitization ---
 
@@ -52,7 +53,29 @@ const TRANSCRIPT_PREFIXES = [
 
 export function isAllowedTranscriptPath(p: string): boolean {
   const resolved = resolve(p);
-  return TRANSCRIPT_PREFIXES.some((prefix) => resolved.startsWith(prefix + "/"));
+  let candidate = resolved;
+  // If the path exists, resolve symlinks to the real target and require a
+  // regular file. This defeats a symlink planted under the allowlist that
+  // points outside it (e.g. /tmp/claude/x -> /etc/passwd, since /tmp is
+  // world-writable). resolve() alone normalises `..` but does NOT follow links.
+  try {
+    const real = realpathSync(resolved);
+    if (!statSync(real).isFile()) return false;
+    candidate = real;
+  } catch {
+    // Non-existent / unstattable: fall back to the pure path policy below so a
+    // not-yet-written transcript under an allowed prefix is still permitted.
+  }
+  return TRANSCRIPT_PREFIXES.some((prefix) => {
+    if (candidate.startsWith(prefix + "/")) return true;
+    // The prefix itself may be a symlink (e.g. macOS /tmp -> /private/tmp), so
+    // also compare against its real path when it exists.
+    try {
+      return candidate.startsWith(realpathSync(prefix) + "/");
+    } catch {
+      return false;
+    }
+  });
 }
 
 // --- Session boot recovery ---

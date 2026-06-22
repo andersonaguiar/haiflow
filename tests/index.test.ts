@@ -1,4 +1,6 @@
 import { test, expect, describe } from "bun:test";
+import { mkdirSync, writeFileSync, symlinkSync, unlinkSync, rmSync } from "fs";
+import { randomUUID } from "crypto";
 import {
   sanitizeSession,
   sanitizeId,
@@ -128,6 +130,37 @@ describe("security", () => {
       const home = process.env.HOME ?? "/";
       expect(isAllowedTranscriptPath(`${home}/.claude`)).toBe(false);
       expect(isAllowedTranscriptPath("/tmp/claude")).toBe(false);
+    });
+
+    test("follows symlinks: allows a real file but rejects one escaping the allowlist", () => {
+      const id = randomUUID();
+      mkdirSync("/tmp/claude", { recursive: true });
+      const outside = `/tmp/haiflow-symlink-target-${id}.txt`;
+      const real = `/tmp/claude/real-${id}.jsonl`;
+      const evil = `/tmp/claude/evil-${id}.jsonl`;
+      writeFileSync(outside, "secret");
+      writeFileSync(real, "{}");
+      symlinkSync(outside, evil);
+      try {
+        // A real regular file under the prefix is allowed (also exercises the
+        // realpath'd-prefix match, e.g. macOS /tmp -> /private/tmp).
+        expect(isAllowedTranscriptPath(real)).toBe(true);
+        // A symlink under the prefix pointing outside it resolves out and is rejected.
+        expect(isAllowedTranscriptPath(evil)).toBe(false);
+      } finally {
+        for (const f of [outside, real, evil]) { try { unlinkSync(f); } catch {} }
+      }
+    });
+
+    test("rejects a directory under the prefix (must be a regular file)", () => {
+      const id = randomUUID();
+      const dir = `/tmp/claude/dir-${id}`;
+      mkdirSync(dir, { recursive: true });
+      try {
+        expect(isAllowedTranscriptPath(dir)).toBe(false);
+      } finally {
+        try { rmSync(dir, { recursive: true }); } catch {}
+      }
     });
   });
 });
