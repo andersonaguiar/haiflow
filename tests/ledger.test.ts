@@ -157,3 +157,38 @@ describe("usageSince windowing", () => {
     expect(agg.savedUsd).toBeCloseTo(0.5, 6);
   });
 });
+
+describe("ledger finish merge + orphan finish", () => {
+  test("recordTaskFinish without a prior start inserts a row with null started_at/duration", () => {
+    // The watchdog finishes a stuck task it never started; dispatchOrQueue can
+    // also race the Stop hook. The row must still be valid, just unwindowed.
+    recordTaskFinish({ id: "orphan-1", session: "s9", status: "timed_out", error: "watchdog:timeout" });
+    const row = getTask("orphan-1");
+    expect(row?.status).toBe("timed_out");
+    expect(row?.error).toBe("watchdog:timeout");
+    expect(row?.started_at).toBeNull();
+    expect(row?.duration_ms).toBeNull();
+    expect(row?.prompt).toBeNull();
+  });
+
+  test("a second finish preserves steps/model via COALESCE while updating status/error", () => {
+    recordTaskStart({ id: "merge-1", session: "s9", prompt: "p" });
+    recordTaskFinish({
+      id: "merge-1",
+      session: "s9",
+      status: "completed",
+      steps: [{ seq: 0, tool: "Bash", summary: "ls", isError: false }],
+      model: "claude-opus-4-8",
+    });
+    // A second hook (e.g. watchdog after the Stop hook) re-finishes with only a
+    // new status + error. The earlier timeline must survive, not be wiped.
+    recordTaskFinish({ id: "merge-1", session: "s9", status: "failed", error: "later failure" });
+
+    const row = getTask("merge-1");
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe("later failure");
+    expect(row?.steps.length).toBe(1);
+    expect(row?.steps[0]?.tool).toBe("Bash");
+    expect(row?.model).toBe("claude-opus-4-8");
+  });
+});

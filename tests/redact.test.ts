@@ -51,4 +51,24 @@ describe("secret redaction", () => {
     const r = redact("internal id ACME-9988", { extraPatterns: [/ACME-\d+/g] });
     expect(r.text).toContain("[REDACTED:custom]");
   });
+
+  // Pin the credential shapes that had no direct coverage — these regexes are
+  // the last line of defence against accidental secret egress, so a tweak that
+  // silently breaks one (e.g. the length-sensitive google key) must fail a test.
+  const cases: [string, string][] = [
+    ["stripe-key", "sk_live_" + "a".repeat(24)],
+    ["stripe-key", "rk_test_" + "b".repeat(20)],
+    ["google-api-key", "AIza" + "c".repeat(35)],
+    ["slack-token", "xoxb-" + "1234567890abcdef"],
+    ["github-pat", "github_pat_" + "d".repeat(25)],
+    ["openai-key", "sk-" + "e".repeat(40)],
+  ];
+  for (const [type, secret] of cases) {
+    test(`redacts a ${type}`, () => {
+      const r = redact(`token is ${secret} ok`);
+      expect(r.text).toContain(`[REDACTED:${type}]`);
+      expect(r.text).not.toContain(secret);
+      expect(r.types).toContain(type);
+    });
+  }
 });
