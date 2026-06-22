@@ -10,28 +10,22 @@ describe("verifySignature: github scheme", () => {
   const recipe: IngestRecipe = { scheme: "github", secret: SECRET, target: "trigger" };
   const body = JSON.stringify({ action: "opened" });
 
-  test("accepts a valid signature and uses the delivery GUID as the nonce", () => {
-    const r = verifySignature(recipe, body, {
-      "x-hub-signature-256": "sha256=" + hmac(body),
-      "x-github-delivery": "guid-123",
-    });
-    expect(r.ok).toBe(true);
-    expect(r.nonce).toBe("guid-123");
-  });
-
-  test("falls back to the signature as nonce when no delivery header is present", () => {
+  test("accepts a valid signature and uses the signature as the nonce", () => {
     const sig = "sha256=" + hmac(body);
-    const r = verifySignature(recipe, body, { "x-hub-signature-256": sig });
+    const r = verifySignature(recipe, body, { "x-hub-signature-256": sig, "x-github-delivery": "guid-123" });
     expect(r.ok).toBe(true);
     expect(r.nonce).toBe(sig);
   });
 
-  test("two identical-body events get distinct nonces via their delivery GUIDs", () => {
+  test("SECURITY: the nonce is bound to the signature, NOT the unsigned X-GitHub-Delivery header", () => {
+    // An attacker can freely set X-GitHub-Delivery (it is not covered by the
+    // HMAC). The replay nonce must NOT change when only that header changes,
+    // or a captured signed delivery could be replayed forever with fresh GUIDs.
     const sig = "sha256=" + hmac(body);
     const a = verifySignature(recipe, body, { "x-hub-signature-256": sig, "x-github-delivery": "guid-a" });
     const b = verifySignature(recipe, body, { "x-hub-signature-256": sig, "x-github-delivery": "guid-b" });
     expect(a.ok && b.ok).toBe(true);
-    expect(a.nonce).not.toBe(b.nonce);
+    expect(a.nonce).toBe(b.nonce); // same signed payload -> same nonce -> replay caught
   });
 
   test("rejects a tampered signature", () => {

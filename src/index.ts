@@ -652,13 +652,23 @@ function sendToTmux(session: string, prompt: string): boolean {
 // Large-prompt temp files (above) are normally removed by a 60s timer, but that
 // timer is lost on crash/restart, leaking plaintext prompts in /tmp. Sweep any
 // leftovers on boot. Returns the number removed.
+// A prompt temp file is kept alive for 60s so Claude can read it. Only sweep
+// files comfortably past that window (2x), so this boot sweep never deletes a
+// concurrently-running or just-restarted instance's in-flight prompt.
+const PROMPT_FILE_STALE_MS = 120_000;
+
 function sweepStalePromptFiles(): number {
   let removed = 0;
   try {
+    const now = Date.now();
     for (const f of readdirSync("/tmp")) {
-      if (f.startsWith("haiflow-prompt-") && f.endsWith(".txt")) {
-        try { unlinkSync(`/tmp/${f}`); removed++; } catch {}
-      }
+      if (!f.startsWith("haiflow-prompt-") || !f.endsWith(".txt")) continue;
+      const path = `/tmp/${f}`;
+      try {
+        if (now - statSync(path).mtimeMs < PROMPT_FILE_STALE_MS) continue;
+        unlinkSync(path);
+        removed++;
+      } catch {}
     }
   } catch {}
   return removed;
@@ -693,6 +703,11 @@ function sendInterrupt(session: string, mode: "escape" | "ctrl-c" = "escape"): b
 // Persist the response for a finished task. `messages` are the assistant text
 // blocks already mined from the transcript by extractFromTranscript (the same
 // parse the ledger uses), so there is no second jq/transcript pass here.
+// Note: extractFromTranscript windows from the genuine prompt (skipping
+// tool_result-only user turns), so `messages` holds every assistant text block
+// of the task — including intermediate prose, not only the final answer. This
+// is intentionally more complete than the old jq (which started at the last
+// tool_result); consumers like the GitHub bridge join all blocks.
 function saveResponse(session: string, taskId: string, prompt?: string, messages?: string[], lastMessage?: string) {
   if (!taskId) return;
   const file = responseFile(session, taskId);

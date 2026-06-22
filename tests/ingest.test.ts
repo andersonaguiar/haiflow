@@ -48,6 +48,11 @@ beforeAll(async () => {
       scheme: "hmac-sha256", secret: GENERIC_SECRET, target: "publish",
     },
   }));
+  // The publish-target recipe targets this topic; it must exist in the pipeline
+  // or publishEvent early-returns and nothing is actually published.
+  writeFileSync(`${TEST_DIR}/pipeline.json`, JSON.stringify({
+    topics: { "ingest.pub": { subscribers: [] } }, emitters: {},
+  }));
   seedIdle("g-worker");
   seedIdle("gh-worker");
 
@@ -112,6 +117,24 @@ describe("signed inbound webhook gateway", () => {
     expect(st.currentPrompt).toContain("Review the issue.");
   });
 
+  test("SECURITY: a captured github delivery can't be replayed by changing X-GitHub-Delivery", async () => {
+    // X-GitHub-Delivery is unsigned, so the replay nonce must be the signature.
+    const raw = JSON.stringify({ issue: { title: "replay-guard" }, _n: randomUUID() });
+    const sig = "sha256=" + hmacHex(GH_SECRET, raw);
+    const send = (guid: string) => fetch(`${BASE}/ingest/gh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Hub-Signature-256": sig, "X-GitHub-Delivery": guid },
+      body: raw,
+    });
+    const first = await send("delivery-1");
+    // 503 = Redis down (fail-closed), so the nonce store is unavailable — can't
+    // exercise replay dedup; only assert it when Redis is present.
+    if (first.status === 503) return;
+    expect(first.status).toBe(200);
+    const second = await send("delivery-2"); // same signed body, different UNSIGNED guid
+    expect(second.status).toBe(409); // nonce is the signature -> replay caught despite the new guid
+  });
+
   test("rejects a replayed delivery with 409 (requires Redis)", async () => {
     const raw = JSON.stringify({ issue: { title: "replay me" }, n: 1 });
     const sig = hmacHex(GENERIC_SECRET, raw);
@@ -128,7 +151,8 @@ describe("signed inbound webhook gateway", () => {
   });
 
   test("publish target emits to the recipe topic", async () => {
-    const raw = JSON.stringify({ issue: { title: "publish me" }, _n: randomUUID() });
+    const title = `publish-${randomUUID()}`;
+    const raw = JSON.stringify({ issue: { title }, _n: randomUUID() });
     const res = await fetch(`${BASE}/ingest/pub`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Haiflow-Signature": hmacHex(GENERIC_SECRET, raw) },
@@ -138,6 +162,16 @@ describe("signed inbound webhook gateway", () => {
     const data = await res.json();
     expect(data.target).toBe("publish");
     expect(data.topic).toBe("ingest.pub");
+
+    // Verify the publish side effect actually happened (the topic must exist in
+    // pipeline.json or publishEvent early-returns). Event persistence needs Redis.
+    const pipeRes = await fetch(`${BASE}/pipeline`, { headers: { Authorization: `Bearer ${TEST_API_KEY}` } });
+    if (!(await pipeRes.json()).redis) return; // Redis down: nothing persisted to assert
+    await Bun.sleep(150);
+    const evRes = await fetch(`${BASE}/events?limit=20`, { headers: { Authorization: `Bearer ${TEST_API_KEY}` } });
+    const { events } = await evRes.json();
+    const evt = events.find((e: any) => e.topic === "ingest.pub" && e.message.includes(title));
+    expect(evt).toBeDefined();
   });
 
   test("publish target without a topic returns 400", async () => {

@@ -56,13 +56,15 @@ export function verifySignature(recipe: IngestRecipe, rawBody: string, headers: 
     const header = headers["x-hub-signature-256"] ?? "";
     const expected = "sha256=" + hmacHex(secret, rawBody);
     if (!safeEqual(header, expected)) return { ok: false, reason: "bad signature" };
-    // Use the per-delivery GUID as the replay nonce, not the signature. The
-    // signature is deterministic over the body, so two DIFFERENT events with an
-    // identical body would otherwise collide and the second be dropped as a
-    // "replay". The delivery GUID is unique per event (and stable across
-    // GitHub's own retries, so an idempotent retry of the same delivery is still
-    // deduped). Fall back to the signature when the header is absent.
-    return { ok: true, nonce: headers["x-github-delivery"] || header };
+    // The replay nonce MUST be bound to signed material. X-Hub-Signature-256
+    // covers only the request body, so the signature is the one value an
+    // attacker can't forge without the secret. We must NOT key the nonce on
+    // X-GitHub-Delivery: that header is unsigned and freely settable, so an
+    // attacker who captured one valid signed delivery could replay it forever by
+    // sending the same body+signature with a fresh GUID each time. GitHub bodies
+    // are effectively unique per event, so signature-as-nonce does not collide
+    // legitimate distinct events; replay protection is bounded by the nonce TTL.
+    return { ok: true, nonce: header };
   }
 
   if (recipe.scheme === "stripe") {

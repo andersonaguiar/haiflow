@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { existsSync, writeFileSync, mkdirSync, rmSync, unlinkSync } from "fs";
+import { existsSync, writeFileSync, mkdirSync, rmSync, unlinkSync, utimesSync } from "fs";
 import { randomUUID } from "crypto";
 
 const TEST_DIR = "/tmp/haiflow-boot-test";
@@ -10,9 +10,17 @@ afterAll(() => {
 });
 
 describe("startup prompt-file sweep", () => {
-  test("removes stale /tmp/haiflow-prompt-*.txt left by a crashed run", async () => {
-    const sentinel = `/tmp/haiflow-prompt-${randomUUID()}.txt`;
-    writeFileSync(sentinel, "stale large-prompt contents");
+  test("removes stale prompt files but keeps in-flight (recent) ones", async () => {
+    // Stale leftover from a crashed run: backdate its mtime past the 120s window.
+    const stale = `/tmp/haiflow-prompt-${randomUUID()}.txt`;
+    writeFileSync(stale, "stale large-prompt contents");
+    const old = new Date(Date.now() - 5 * 60 * 1000);
+    utimesSync(stale, old, old);
+
+    // A just-written prompt belonging to a concurrent/restarting instance must
+    // NOT be swept (it's still inside its 60s read window).
+    const fresh = `/tmp/haiflow-prompt-${randomUUID()}.txt`;
+    writeFileSync(fresh, "in-flight large-prompt contents");
 
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -33,10 +41,11 @@ describe("startup prompt-file sweep", () => {
       }
       expect(ready).toBe(true);
       // The boot sweep runs during module init, before /health responds.
-      expect(existsSync(sentinel)).toBe(false);
+      expect(existsSync(stale)).toBe(false); // stale -> reaped
+      expect(existsSync(fresh)).toBe(true);  // in-flight -> preserved
     } finally {
       proc.kill();
-      try { unlinkSync(sentinel); } catch {}
+      for (const f of [stale, fresh]) { try { unlinkSync(f); } catch {} }
     }
   });
 });
