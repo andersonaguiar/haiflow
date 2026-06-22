@@ -369,14 +369,23 @@ export class EventBus {
   }
 
   /**
-   * Atomically claim a one-time nonce. Returns true if newly seen (proceed),
-   * false if it was already recorded (a replay). Without Redis there is no
-   * cross-request memory, so it returns true and replay protection is skipped.
+   * Atomically claim a one-time nonce. "fresh" = newly seen (proceed),
+   * "duplicate" = already recorded (a replay), "unavailable" = Redis couldn't be
+   * reached so the claim could not be made. The caller decides how to treat
+   * "unavailable" (the ingest gateway fails closed).
    */
-  async markNonce(key: string, ttlSec: number): Promise<boolean> {
-    if (!this.connected) return true;
-    const res = await this.redis.send("SET", [`haiflow:nonce:${key}`, "1", "NX", "EX", String(Math.max(1, ttlSec))]);
-    return res === "OK";
+  async markNonce(key: string, ttlSec: number): Promise<"fresh" | "duplicate" | "unavailable"> {
+    // Return a distinct "unavailable" when Redis can't be reached (at the start
+    // OR mid-call) instead of silently proceeding. The caller (ingest gateway)
+    // fails closed on "unavailable", which closes a TOCTOU where Redis drops
+    // between a separate liveness probe and this atomic claim.
+    if (!this.connected) return "unavailable";
+    try {
+      const res = await this.redis.send("SET", [`haiflow:nonce:${key}`, "1", "NX", "EX", String(Math.max(1, ttlSec))]);
+      return res === "OK" ? "fresh" : "duplicate";
+    } catch {
+      return "unavailable";
+    }
   }
 
   /** Flush all haiflow keys (for testing). */

@@ -53,9 +53,9 @@ describe("EventBus no-Redis fallback", () => {
       expect(await offline.getRecentEvents()).toEqual([]);
       expect(await offline.getUnprocessedEvents()).toEqual([]);
 
-      // Replay protection is skipped (markNonce returns true = "newly seen,
-      // proceed") because there is no store to dedupe against.
-      expect(await offline.markNonce("nonce-1", 60)).toBe(true);
+      // markNonce reports "unavailable" (not a silent "fresh") when there is no
+      // store to dedupe against, so callers can fail closed instead of proceeding.
+      expect(await offline.markNonce("nonce-1", 60)).toBe("unavailable");
     } finally {
       offline.close();
     }
@@ -63,6 +63,14 @@ describe("EventBus no-Redis fallback", () => {
 });
 
 describe("EventBus", () => {
+  // --- markNonce (replay nonce) ---
+
+  test("markNonce: fresh once, then duplicate", async () => {
+    const key = `t-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    expect(await bus.markNonce(key, 60)).toBe("fresh");
+    expect(await bus.markNonce(key, 60)).toBe("duplicate");
+  });
+
   // --- recordEvent ---
 
   test("recordEvent returns an event ID", async () => {

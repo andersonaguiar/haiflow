@@ -126,10 +126,10 @@ describe("signed inbound webhook gateway", () => {
       headers: { "Content-Type": "application/json", "X-Hub-Signature-256": sig, "X-GitHub-Delivery": guid },
       body: raw,
     });
+    // Assert directly (no skip): replay dedup needs Redis, but so do the sibling
+    // ingest tests (they fail-close with 503 without it), so the whole suite
+    // already requires Redis — a silent skip here would let the regression hide.
     const first = await send("delivery-1");
-    // 503 = Redis down (fail-closed), so the nonce store is unavailable — can't
-    // exercise replay dedup; only assert it when Redis is present.
-    if (first.status === 503) return;
     expect(first.status).toBe(200);
     const second = await send("delivery-2"); // same signed body, different UNSIGNED guid
     expect(second.status).toBe(409); // nonce is the signature -> replay caught despite the new guid

@@ -8,7 +8,9 @@ on:
       - "src/**"
       - "hooks/**"
       - "package.json"
-      - "tests/install/**"
+      - "bun.lock"
+      - "tsconfig.json"
+      - "tests/**"
       - ".github/workflows/install-test.yml"
   push:
     branches: [main]
@@ -33,3 +35,32 @@ jobs:
 
       - name: Run E2E with Redis unavailable (fallback path)
         run: docker run --rm -e SKIP_REDIS=1 haiflow-install-test
+
+  unit-test:
+    name: typecheck + bun test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # tmux lets isTmuxRunning behave normally; the live-Claude integration
+      # tests self-skip when the claude CLI is absent (it isn't installed here).
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: bun install
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Run test suite
+        run: bun test
+        env:
+          REDIS_URL: redis://localhost:6379

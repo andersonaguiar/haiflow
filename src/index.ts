@@ -81,6 +81,13 @@ const MAX_PROMPT_SIZE = 512_000;
 // knowingly run ingest without Redis and accept that replay risk.
 const INGEST_ALLOW_WITHOUT_REDIS = (process.env.HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS ?? "false").toLowerCase() === "true";
 
+// Replay-nonce lifetime, DECOUPLED from a recipe's freshness window (maxAgeSec).
+// Schemes without a signed timestamp (github, untimestamped hmac) have no
+// freshness check, so this nonce is their ONLY replay defense — it must outlive
+// the freshness window. A long TTL bounds how often a captured signed payload
+// can be replayed (default 7 days; raise/lower with care vs Redis memory).
+const INGEST_NONCE_TTL_SEC = Number(process.env.HAIFLOW_INGEST_NONCE_TTL_SEC ?? 604800) || 604800;
+
 // Default age (hours) above which POST /sessions/prune reaps an offline session's
 // state directory. Overridable per-request via the `olderThanHours` body field.
 const SESSION_TTL_HOURS = Number(process.env.HAIFLOW_SESSION_TTL_HOURS ?? 24) || 24;
@@ -1322,16 +1329,20 @@ const server = Bun.serve({
           return Response.json({ error: "Signature verification failed" }, { status: 401 });
         }
 
-        // Replay protection: each signature/nonce may be used once (needs Redis).
-        // Fail closed when Redis is down so a captured signed webhook can't be
-        // replayed without limit (override with HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS).
+        // Replay protection: each signed delivery's nonce may be used once. The
+        // nonce is bound to signed material (see verifySignature). The nonce TTL
+        // is long (INGEST_NONCE_TTL_SEC), not the freshness window, since schemes
+        // without a signed timestamp rely solely on it. We decide purely from
+        // markNonce's result (no separate liveness probe) so a Redis drop can't
+        // slip through a TOCTOU: "unavailable" fails closed (503) unless opted out.
         if (verify.nonce) {
-          if (!eventBus.connected && !INGEST_ALLOW_WITHOUT_REDIS) {
+          const nonceTtl = Math.max(INGEST_NONCE_TTL_SEC, recipe.maxAgeSec ?? 0);
+          const seen = await eventBus.markNonce(`ingest:${source}:${verify.nonce}`, nonceTtl);
+          if (seen === "unavailable" && !INGEST_ALLOW_WITHOUT_REDIS) {
             log("warn", "ingest_replay_unavailable", { source });
             return Response.json({ error: "Replay protection unavailable (Redis down)" }, { status: 503 });
           }
-          const fresh = await eventBus.markNonce(`ingest:${source}:${verify.nonce}`, recipe.maxAgeSec ?? 300);
-          if (!fresh) {
+          if (seen === "duplicate") {
             log("warn", "ingest_replay", { source });
             return Response.json({ error: "Replay detected" }, { status: 409 });
           }
