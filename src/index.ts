@@ -347,39 +347,22 @@ async function deliverToSubscribers(
     }
 
     const taskId = generateId();
-    const state = readState(subscriberSession);
 
-    if (state.status === "offline") {
-      const queue = readQueue(subscriberSession);
-      queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain, priority: sub.priority });
-      writeQueue(subscriberSession, queue);
-      log("warn", "pipeline_subscriber_offline", { topic, subscriber: subscriberSession, taskId });
-      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "queued");
-      continue;
-    }
-
-    if (state.status === "busy") {
-      const queue = readQueue(subscriberSession);
-      queue.push({ id: taskId, prompt, addedAt: new Date().toISOString(), source: `pipeline:${topic}`, chain, priority: sub.priority });
-      writeQueue(subscriberSession, queue);
-      log("info", "pipeline_queued", { topic, subscriber: subscriberSession, taskId });
-      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "queued");
-      continue;
-    }
-
-    // Session is idle — send immediately
-    writeState(subscriberSession, {
-      status: "busy",
-      since: new Date().toISOString(),
-      currentPrompt: prompt,
-      currentTaskId: taskId,
-      currentChain: chain,
-      deadlineAt: taskDeadline(),
+    // Reuse the single dispatch sequence (idle -> busy + send, else queue) so
+    // the pipeline path can't drift from /trigger, /pool, /map and /ingest. Map
+    // its outcome to the pipeline log event and the delivery status.
+    const where = dispatchOrQueue(subscriberSession, prompt, {
+      id: taskId, source: `pipeline:${topic}`, chain, priority: sub.priority,
     });
-    recordTaskStart({ id: taskId, session: subscriberSession, prompt, source: `pipeline:${topic}`, chain });
-    sendToTmux(subscriberSession, prompt);
-    log("info", "pipeline_dispatched", { topic, subscriber: subscriberSession, taskId });
-    if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "delivered");
+    if (where === "sent") {
+      log("info", "pipeline_dispatched", { topic, subscriber: subscriberSession, taskId });
+      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "delivered");
+    } else {
+      log(where === "queued_offline" ? "warn" : "info",
+        where === "queued_offline" ? "pipeline_subscriber_offline" : "pipeline_queued",
+        { topic, subscriber: subscriberSession, taskId });
+      if (eventId) await eventBus.recordDelivery(eventId, subscriberSession, "session", "queued");
+    }
   }
 }
 
