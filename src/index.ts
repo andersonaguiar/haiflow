@@ -122,6 +122,12 @@ process.on("uncaughtException", (err) => {
   });
 });
 
+// Parse a JSON request body, returning null on malformed/empty input so handlers
+// can answer a clean 400 instead of throwing an opaque 500.
+async function readJson(req: Request): Promise<any> {
+  try { return await req.json(); } catch { return null; }
+}
+
 // --- Auth ---
 
 const API_KEY_BUFFER = Buffer.from(`Bearer ${API_KEY}`);
@@ -1048,7 +1054,8 @@ const server = Bun.serve({
 
     "/trigger": {
       POST: authed(async (req) => {
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const prompt = body.prompt as string;
         const source = body.source as string | undefined;
         const id = body.id ? sanitizeId(body.id as string) : generateId();
@@ -1174,7 +1181,8 @@ const server = Bun.serve({
     "/pool/:name/trigger": {
       POST: authed(async (req) => {
         const name = sanitizeSession(req.params.name);
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const prompt = body.prompt as string;
         if (!prompt) return Response.json({ error: "prompt is required" }, { status: 400 });
         if (prompt.length > MAX_PROMPT_SIZE) return Response.json({ error: `prompt exceeds ${MAX_PROMPT_SIZE} character limit` }, { status: 413 });
@@ -1201,7 +1209,8 @@ const server = Bun.serve({
     // every item has come back (the fan-in / JOIN).
     "/map": {
       POST: authed(async (req) => {
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const items = body.items;
         const poolName = sanitizeSession((body.pool as string) ?? "");
         const mapTemplate = body.mapTemplate as string;
@@ -1362,7 +1371,8 @@ const server = Bun.serve({
 
     "/publish": {
       POST: authed(async (req) => {
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const topic = body.topic as string;
         const message = body.message as string;
         const session = body.session as string | undefined;
@@ -1660,7 +1670,8 @@ const server = Bun.serve({
       POST: async (req) => {
         const err = requireLocalhost(req);
         if (err) return err;
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const claudeId = body.session_id;
         let session = findSessionByClaudeId(claudeId);
 
@@ -1690,7 +1701,8 @@ const server = Bun.serve({
       POST: async (req) => {
         const err = requireLocalhost(req);
         if (err) return err;
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const session = findSessionByClaudeId(body.session_id);
         if (!session) return Response.json({ ok: true });
 
@@ -1715,7 +1727,8 @@ const server = Bun.serve({
       POST: async (req) => {
         const err = requireLocalhost(req);
         if (err) return err;
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const session = findSessionByClaudeId(body.session_id);
         if (!session) return Response.json({ ok: true });
 
@@ -1774,7 +1787,8 @@ const server = Bun.serve({
       POST: async (req) => {
         const err = requireLocalhost(req);
         if (err) return err;
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const session = findSessionByClaudeId(body.session_id);
         if (!session) return Response.json({ ok: true });
 
@@ -1793,7 +1807,8 @@ const server = Bun.serve({
       POST: async (req) => {
         const err = requireLocalhost(req);
         if (err) return err;
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const session = findSessionByClaudeId(body.session_id);
         if (!session) return Response.json({ ok: true });
 
@@ -1817,7 +1832,8 @@ const server = Bun.serve({
 
     "/session/start": {
       POST: authed(async (req) => {
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const session = sanitizeSession((body.session as string) || "default");
         const requestedCwd = body.cwd as string | undefined;
 
@@ -1849,7 +1865,8 @@ const server = Bun.serve({
       POST: authed(async (req) => {
         let session = "default";
         try {
-          const body = await req.json();
+          const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
           session = sanitizeSession((body.session as string) || "default");
         } catch {}
 
@@ -1863,7 +1880,8 @@ const server = Bun.serve({
 
     "/session/remove": {
       POST: authed(async (req) => {
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const session = sanitizeSession((body.session as string) || "");
         if (!session) return Response.json({ error: "session is required" }, { status: 400 });
 
@@ -1887,7 +1905,8 @@ const server = Bun.serve({
     // wedged on a permission prompt, or to redirect a running agent.
     "/interrupt": {
       POST: authed(async (req) => {
-        const body = await req.json();
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const session = sanitizeSession((body.session as string) || "default");
         const mode = body.mode === "ctrl-c" ? "ctrl-c" : "escape";
 

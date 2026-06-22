@@ -468,6 +468,24 @@ describe("GET /version", () => {
   });
 });
 
+describe("malformed request bodies", () => {
+  test("POST /trigger with invalid JSON returns 400, not 500", async () => {
+    const res = await fetch(`${BASE}/trigger`, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: "{ not valid json",
+    });
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("Invalid or empty JSON");
+  });
+
+  test("POST /trigger with an empty body returns 400", async () => {
+    const res = await fetch(`${BASE}/trigger`, { method: "POST", headers: authHeaders });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("POST /hooks/stop", () => {
   test("returns ok for unknown session", async () => {
     const { data } = await api("/hooks/stop", "POST", {
