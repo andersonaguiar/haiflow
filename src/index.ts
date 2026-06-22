@@ -90,6 +90,21 @@ function log(level: "info" | "warn" | "error", event: string, data?: Record<stri
   else console.log(entry);
 }
 
+// Last-resort safety net. A single rejected promise (e.g. an un-awaited Redis
+// call when the connection drops) or an async throw must not take down the
+// whole orchestrator and starve every session's queue. Log and keep serving;
+// the watchdog and queue drain recover session state on the next tick.
+process.on("unhandledRejection", (reason) => {
+  log("error", "unhandled_rejection", {
+    reason: reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
+  });
+});
+process.on("uncaughtException", (err) => {
+  log("error", "uncaught_exception", {
+    error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+  });
+});
+
 // --- Auth ---
 
 const API_KEY_BUFFER = Buffer.from(`Bearer ${API_KEY}`);
@@ -2044,7 +2059,7 @@ if (unprocessed.length > 0) {
 }
 
 // Retry failed webhooks every 60 seconds
-setInterval(async () => {
+const retryTimer = setInterval(async () => {
   const retries = await eventBus.getPendingWebhookRetries();
   for (const retry of retries) {
     const pipeline = readPipeline();
@@ -2089,7 +2104,7 @@ setInterval(async () => {
 }, 60_000);
 
 // Prune events older than 7 days, every 24 hours
-setInterval(async () => {
+const pruneTimer = setInterval(async () => {
   const pruned = await eventBus.prune(7);
   if (pruned > 0) log("info", "events_pruned", { count: pruned });
 }, 86_400_000);
@@ -2097,7 +2112,7 @@ setInterval(async () => {
 // Delay tick: drain scheduled queue items once their notBefore passes, even on
 // an idle session (normal draining only happens when a task Stops). drainQueue
 // no-ops when nothing is eligible, so this is cheap.
-setInterval(() => {
+const delayTickTimer = setInterval(() => {
   for (const { session, status } of listSessions()) {
     if (status === "idle") drainQueue(session);
   }
@@ -2107,7 +2122,7 @@ setInterval(() => {
 // the Notification hook) or past their hard deadline, so a stuck session can't
 // silently sit busy forever and starve its queue. Recovery (Escape + drain) is
 // opt-in via HAIFLOW_WATCHDOG_RECOVER; by default this only alerts in the logs.
-setInterval(() => {
+const watchdogTimer = setInterval(() => {
   for (const { session, status } of listSessions()) {
     if (status !== "busy") continue;
     const state = readState(session);
@@ -2147,3 +2162,22 @@ setInterval(() => {
     else if (run.reduced && nowMs - run.createdAt > MAP_TIMEOUT_MS + 3_600_000) mapRuns.delete(id);
   }
 }, WATCHDOG_INTERVAL_MS);
+
+// Graceful shutdown: a process manager (systemd, docker stop, pm2) sends SIGTERM.
+// Without a handler the timers are killed mid-flight, the Redis connection is
+// left open, and spawned terminal PTYs are orphaned. Flush everything and exit.
+let shuttingDown = false;
+function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log("info", "shutdown", { signal });
+  for (const timer of [retryTimer, pruneTimer, delayTickTimer, watchdogTimer]) {
+    clearInterval(timer);
+  }
+  try { server.stop(true); } catch {}
+  try { eventBus.close(); } catch {}
+  process.exit(0);
+}
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => shutdown(signal));
+}
