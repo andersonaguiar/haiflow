@@ -1,5 +1,20 @@
 import { test, expect, describe } from "bun:test";
-import { recoverSessionPatch } from "../src/utils";
+import { recoverSessionPatch, prefixedId, generateId } from "../src/utils";
+
+describe("prefixedId", () => {
+  test("uses the given prefix and the <prefix>_<ms>_<6 chars> shape", () => {
+    const id = prefixedId("evt");
+    expect(id).toMatch(/^evt_\d+_[a-z0-9]{1,6}$/);
+  });
+
+  test("generateId is prefixedId('task')", () => {
+    expect(generateId()).toStartWith("task_");
+  });
+
+  test("successive ids differ", () => {
+    expect(prefixedId("map")).not.toBe(prefixedId("map"));
+  });
+});
 
 const NOW = "2026-06-22T00:00:00.000Z";
 

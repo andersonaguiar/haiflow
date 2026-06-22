@@ -2,7 +2,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlink
 import type { ServerWebSocket, Subprocess } from "bun";
 import dashboard from "./dashboard/index.html";
 import {
-  sanitizeSession, sanitizeId, generateId, tmuxName,
+  sanitizeSession, sanitizeId, generateId, prefixedId, tmuxName,
   validateStructural,
   isAllowedTranscriptPath, renderTemplate, recoverSessionPatch,
 } from "./utils";
@@ -1226,7 +1226,7 @@ const server = Bun.serve({
           ? { session: sanitizeSession(body.reduce.session as string), promptTemplate: String(body.reduce.promptTemplate) }
           : undefined;
 
-        const runId = `map_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const runId = prefixedId("map");
         const run: MapRun = { runId, pool: poolName, total: items.length, collected: {}, reduce, source: body.source, createdAt: Date.now(), reduced: false };
         mapRuns.set(runId, run);
 

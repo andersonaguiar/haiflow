@@ -6,8 +6,14 @@ export function sanitizeSession(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "default";
 }
 
+// A sortable-ish, collision-resistant id: `<prefix>_<ms>_<6 base36 chars>`.
+// Shared by task/map/event ids so the shape lives in one place.
+export function prefixedId(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export function generateId(): string {
-  return `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return prefixedId("task");
 }
 
 export function sanitizeId(id: string): string {

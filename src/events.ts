@@ -1,4 +1,5 @@
 import { RedisClient } from "bun";
+import { prefixedId } from "./utils";
 
 // --- Types ---
 
@@ -101,7 +102,7 @@ export class EventBus {
     taskId: string;
     chain?: string[];
   }): Promise<string> {
-    const id = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const id = prefixedId("evt");
     if (!this.connected) return id;
 
     const record: EventRecord = {
