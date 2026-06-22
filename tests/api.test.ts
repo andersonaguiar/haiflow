@@ -123,6 +123,15 @@ describe("POST /session/start", () => {
     // Will fail with 409 or succeed depending on tmux, but session name should be sanitized
     expect(status).toBeOneOf([200, 409]);
   });
+
+  // Runs only where the Claude CLI is absent (e.g. CI). Locks in the fast-fail:
+  // without this guard /session/start hangs ~45s on the readiness/guardrail
+  // waits instead of returning a clear error.
+  test.skipIf(!!Bun.which("claude"))("fails fast with 409 when the claude CLI is absent", async () => {
+    const { status, data } = await api("/session/start", "POST", { session: "no-claude", cwd: "/tmp" });
+    expect(status).toBe(409);
+    expect(data.error).toContain("claude");
+  });
 });
 
 // --- Trigger ---
