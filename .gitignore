@@ -22,6 +22,16 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.production.local
 .env.local
 
+# haiflow runtime config & state — these hold real secrets (ingest HMAC keys,
+# webhook URLs, task outputs). They normally live in HAIFLOW_DATA_DIR (/tmp),
+# but never commit them if they ever land in the repo. The committed examples
+# under examples/ are unaffected (different names/paths).
+ingest.json
+ingest.*.json
+pipeline.json
+responses/
+transcripts/
+
 # caches
 .eslintcache
 .cache
