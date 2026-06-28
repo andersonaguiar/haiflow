@@ -1,6 +1,5 @@
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, unlinkSync, statSync, renameSync, rmSync } from "fs";
 import type { ServerWebSocket, Subprocess } from "bun";
-import dashboard from "./dashboard/index.html";
 import {
   sanitizeSession, sanitizeId, generateId, prefixedId, tmuxName,
   validateStructural,
@@ -16,6 +15,31 @@ import {
 import { estimateSavings } from "./pricing";
 import { verifySignature, buildFramedPrompt, type IngestRecipe } from "./ingest";
 import { redact } from "./redact";
+
+// --- Dashboard (pre-built static assets) ---
+// Compiled ahead of time by scripts/build-dashboard.ts into dist/dashboard
+// (Tailwind compiled via bun-plugin-tailwind). We serve those static files
+// rather than importing the HTML at runtime, because Bun's `[serve.static]`
+// plugins config is NOT applied to programmatic Bun.serve() HTML routes, so a
+// runtime import would ship uncompiled Tailwind. The compiled output is built
+// in the source tree (`bun run build:dashboard`) and committed/shipped — a
+// global install lives under node_modules, where the plugin skips compilation.
+const DASHBOARD_DIR = `${import.meta.dir}/../dist/dashboard`;
+const DASHBOARD_BUILT = existsSync(`${DASHBOARD_DIR}/index.html`);
+
+function serveDashboard(reqPath: string): Response {
+  if (!DASHBOARD_BUILT) {
+    return new Response("haiflow dashboard is not built. Run `bun run build:dashboard`.", {
+      status: 503,
+      headers: { "content-type": "text/plain" },
+    });
+  }
+  const name = reqPath.split("/").pop() || "index.html";
+  if (!/^[\w.-]+$/.test(name)) return new Response("Not found", { status: 404 });
+  const filePath = `${DASHBOARD_DIR}/${name}`;
+  if (!existsSync(filePath)) return new Response("Not found", { status: 404 });
+  return new Response(Bun.file(filePath));
+}
 
 const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
@@ -2230,7 +2254,8 @@ const server = Bun.serve({
     "/version": {
       GET: () => Response.json({ version: VERSION, startedAt: STARTED_AT, redis: eventBus.connected }),
     },
-    "/dashboard": dashboard,
+    "/dashboard": () => serveDashboard("index.html"),
+    "/dashboard/*": (req: Request) => serveDashboard(new URL(req.url).pathname),
 
     // WebSocket upgrade for live terminal view
     "/terminal": {
