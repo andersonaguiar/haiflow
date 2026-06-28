@@ -2,12 +2,28 @@
 
 Expose haiflow to the internet with two layers of security: Cloudflare Access (identity) + your API key (authorization).
 
+> **The golden rule: never expose the raw origin.** The identity layer only works if the public can't reach haiflow's port directly. Run haiflow in production mode so it binds to loopback (`127.0.0.1`) and only the local tunnel can forward to it — otherwise an attacker who can reach the port skips Cloudflare Access entirely.
+
 ## Prerequisites
 
 - A Cloudflare account (free plan works)
 - A domain added to Cloudflare (even a cheap one works)
 - `cloudflared` installed: `brew install cloudflared`
 - haiflow running locally on port 3333
+
+## 0. Run haiflow in production mode
+
+Set these in your `.env` (or environment) before starting haiflow:
+
+```bash
+HAIFLOW_ENV=production            # fail closed on insecure exposure
+HAIFLOW_API_KEY=$(openssl rand -hex 32)   # strong key (≥24 chars, no placeholder)
+# HAIFLOW_HOST defaults to 127.0.0.1 — leave it loopback so only cloudflared reaches it
+```
+
+In production mode haiflow **refuses to boot** if it would bind to a public interface (`0.0.0.0`/LAN/public IP) without `HAIFLOW_ALLOW_PUBLIC_BIND=true`, or if the API key is weak/placeholder. The tunnel below connects to `http://localhost:3333`, which works fine with the loopback bind.
+
+> Only set `HAIFLOW_ALLOW_PUBLIC_BIND=true` if you are *not* using a local tunnel and instead firewall the port yourself and run your own identity layer in front.
 
 ## 1. Authenticate cloudflared
 
@@ -114,12 +130,13 @@ With this setup, an attacker needs ALL of these to reach haiflow:
 
 | Layer | What it does | What's needed to bypass |
 |-------|-------------|------------------------|
+| Loopback origin | In production, haiflow binds `127.0.0.1` only, so the port is unreachable except through the local tunnel | Shell access to your machine |
 | Cloudflare Access | Identity check before traffic reaches your machine | Your email OTP or a service token |
 | HTTPS (automatic) | Encrypts traffic end-to-end | Nothing — always on via Cloudflare |
-| `HAIFLOW_API_KEY` | Authorizes API requests | The Bearer token from your `.env` |
-| Localhost hooks | Restricts `/hooks/*` to local requests | Physical/shell access to your machine |
+| `HAIFLOW_API_KEY` | Authorizes API requests (production enforces a strong key) | The Bearer token from your `.env` |
+| Localhost hooks | Restricts `/hooks/*` to local requests, rejecting any proxied request | Physical/shell access to your machine |
 
-Stealing your `.env` alone is no longer enough — the attacker also needs to pass the Cloudflare Access identity check.
+Stealing your `.env` alone is no longer enough — the attacker also needs to pass the Cloudflare Access identity check, and can't reach the origin directly because it's bound to loopback.
 
 ## Quick reference
 

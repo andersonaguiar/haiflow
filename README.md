@@ -159,13 +159,19 @@ cp .env.example .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3333` | HTTP server port |
+| `HAIFLOW_ENV` | `development` | Deployment environment (`development`/`production`; falls back to `NODE_ENV`). In `production`, haiflow fails closed at boot on an insecure exposure and rejects a weak/placeholder key. Dev is permissive (no tunnel required). |
+| `HAIFLOW_HOST` | `127.0.0.1` | Bind address. Loopback by default so the origin is only reachable through a front proxy/tunnel — an identity layer can't be bypassed by hitting the port directly. A public bind in production needs `HAIFLOW_ALLOW_PUBLIC_BIND=true`. See [DEPLOYMENT.md](DEPLOYMENT.md). |
+| `HAIFLOW_ALLOW_PUBLIC_BIND` | `false` | Acknowledge a public bind (`0.0.0.0`/LAN/public IP) in production — you firewall the port and run your own identity layer. Without it, production refuses to start when bound publicly. |
 | `HAIFLOW_DATA_DIR` | `/tmp/haiflow` | Directory for session state, queues, and responses |
 | `HAIFLOW_PORT` | `3333` | Port used by hook scripts (set if different from PORT) |
-| `HAIFLOW_API_KEY` | — | **Required.** Any string you choose — this is your own secret, not a paid key |
+| `HAIFLOW_API_KEY` | — | **Required.** Any string you choose — this is your own secret, not a paid key. In `production` it must be ≥24 chars and not a placeholder. |
 | `HAIFLOW_CWD` | — | When set, every session is forced to use this cwd. The `cwd` field in `/session/start` request bodies is ignored (a warning is logged if it differs). |
 | `HAIFLOW_ALLOW_REQUEST_CWD` | `true` | When `false`, `/session/start` rejects requests that try to set their own `cwd` — `HAIFLOW_CWD` must be set on the server instead. |
 | `HAIFLOW_GUARDRAILS` | `true` | Installs `~/.claude/skills/haiflow-guardrails/SKILL.md` on server boot and injects `/haiflow-guardrails` into each new tmux session. The skill instructs Claude to refuse paths outside cwd, refuse to read secrets, and refuse network exfiltration. |
 | `REDIS_URL` | `redis://localhost:6379` | **Required.** Redis URL for event persistence and delivery tracking |
+| `HAIFLOW_START_READY_TIMEOUT_MS` | `15000` | How long `/session/start` waits for the SessionStart hook to link a Claude session id before failing (a session that never links would silently drop every response — usually means hooks aren't wired) |
+| `HAIFLOW_ALLOW_TRIGGER_CALLBACK` | `false` | Enables the per-`/trigger` `callbackUrl` completion webhook. Off by default because an arbitrary callback URL is an SSRF surface |
+| `HAIFLOW_CALLBACK_ALLOW_HOSTS` | — | Optional comma-separated host allowlist for `callbackUrl`. With it set, callbacks to any other host are rejected with `400` |
 | `N8N_API_KEY` | — | n8n API key for workflow integration |
 | `HAIFLOW_USAGE_ALERT_TOKENS` | — | When set, `GET /usage/window` flags `alert: true` once the rolling 5h token total crosses it (alert-only, never throttles) |
 | `HAIFLOW_TASK_TIMEOUT_SEC` | `0` | Optional hard per-task timeout. `0` disables it. The watchdog flags tasks that exceed it |
@@ -268,6 +274,10 @@ Import the chained calc workflow from `examples/chained-calc/`:
 - `chained-calc-step2.json` — Step 2: multiply result by 5
 - `chained-calc-step3.json` — Step 3: multiply result by 10
 - `pipeline-calc-chain.json` — Pipeline configuration that wires them together
+
+### MCP server (drive haiflow from any agent)
+
+`integrations/haiflow-mcp/` is an MCP server that exposes haiflow as tools (`haiflow_run`, `haiflow_start_session`, `haiflow_trigger`, `haiflow_get_response`, `haiflow_stop_session`, `haiflow_status`, `haiflow_doctor`, `haiflow_map`), so any MCP-capable agent (Claude Desktop, Cursor, Cline, another Claude Code) can orchestrate Claude Code through haiflow. See `integrations/haiflow-mcp/README.md` for wiring. Inside Claude Code, the `haiflow` skill teaches an agent to drive the HTTP API directly.
 
 ### GitHub bridge
 
@@ -468,9 +478,12 @@ haiflow/
 │       ├── api.ts
 │       └── components/
 ├── tests/
-│   ├── api.test.ts           # API integration tests
-│   ├── auth.test.ts          # Auth middleware tests
-│   └── index.test.ts         # Unit tests
+│   ├── api.test.ts                  # API integration tests
+│   ├── auth.test.ts                 # Auth middleware tests
+│   ├── consumer-lifecycle.test.ts   # E2E: start → payload → response → stop (fake Claude, no auth needed)
+│   ├── integration.test.ts          # E2E against the REAL Claude CLI (skipped without it)
+│   ├── fixtures/fake-claude.ts      # Test double that drives the hook lifecycle deterministically
+│   └── index.test.ts                # Unit tests
 ├── bin/
 │   ├── haiflow.ts            # CLI wrapper
 │   ├── check-deps.sh         # Dependency checker

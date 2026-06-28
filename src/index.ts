@@ -11,6 +11,7 @@ import { EventBus, nextRetrySchedule } from "./events";
 import {
   initLedger, recordTaskStart, recordTaskFinish, queryTasks, getTask,
   extractFromTranscript, usageSince,
+  type TaskUsage,
 } from "./ledger";
 import { estimateSavings } from "./pricing";
 import { verifySignature, buildFramedPrompt, type IngestRecipe } from "./ingest";
@@ -20,10 +21,47 @@ const BASE_DIR = process.env.HAIFLOW_DATA_DIR ?? "/tmp/haiflow";
 const PORT = Number(process.env.PORT ?? 3333);
 const API_KEY = process.env.HAIFLOW_API_KEY?.trim();
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
+
+// Deployment environment. Explicit HAIFLOW_ENV wins, else NODE_ENV, else dev.
+// Production enforces the server-side half of "never expose a raw origin":
+// loopback-only bind unless the operator explicitly takes responsibility.
+const ENV = (process.env.HAIFLOW_ENV ?? process.env.NODE_ENV ?? "development").trim().toLowerCase();
+const IS_PROD = ENV === "production" || ENV === "prod";
+// Bind address. Default loopback in BOTH envs so the origin is only reachable
+// through a front proxy/tunnel (which forwards from localhost) — an identity
+// layer like Cloudflare Access can't be bypassed by hitting the port directly.
+const HOST = (process.env.HAIFLOW_HOST ?? "127.0.0.1").trim();
+const LOOPBACK_BIND_HOSTS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"]);
+const IS_PUBLIC_BIND = !LOOPBACK_BIND_HOSTS.has(HOST.toLowerCase());
+const ALLOW_PUBLIC_BIND = (process.env.HAIFLOW_ALLOW_PUBLIC_BIND ?? "false").toLowerCase() === "true";
+// Placeholder keys that must never reach production.
+const WEAK_KEYS = new Set(["changeme", "change-me", "secret", "your-secret-key", "your-api-key", "password", "test", "haiflow"]);
 const FORCED_CWD = process.env.HAIFLOW_CWD?.trim() || null;
 const ALLOW_REQUEST_CWD = (process.env.HAIFLOW_ALLOW_REQUEST_CWD ?? "true").toLowerCase() !== "false";
+
+// Single source of truth for the HAIFLOW_CWD / HAIFLOW_ALLOW_REQUEST_CWD policy,
+// shared by /session/start and the /trigger ephemeral auto-start. Returns the
+// resolved cwd, or an `error` to 400 on, plus whether a server-pinned HAIFLOW_CWD
+// overrode the caller's requested cwd.
+function resolveStartCwd(requestedCwd: string | undefined): { cwd?: string; error?: string; overridden?: boolean } {
+  if (FORCED_CWD) return { cwd: FORCED_CWD, overridden: !!(requestedCwd && requestedCwd !== FORCED_CWD) };
+  if (!ALLOW_REQUEST_CWD) return { error: "cwd from request is disabled; set HAIFLOW_CWD on the server" };
+  if (!requestedCwd) return { error: "cwd is required" };
+  return { cwd: requestedCwd };
+}
 const ENABLE_GUARDRAILS = (process.env.HAIFLOW_GUARDRAILS ?? "true").toLowerCase() !== "false";
 const GUARDRAIL_SKILL_NAME = "haiflow-guardrails";
+// How long /session/start waits for the SessionStart hook to link a Claude
+// session id (and the TUI to become interactive) before giving up.
+const START_READY_TIMEOUT_MS = Number(process.env.HAIFLOW_START_READY_TIMEOUT_MS ?? 15_000);
+// Per-trigger completion callbacks: when a task finishes, POST its result to a
+// caller-supplied `callbackUrl`. Off by default — an arbitrary callback URL is
+// an SSRF surface — so opt in explicitly, and optionally restrict to a host
+// allowlist (comma-separated). With the allowlist empty, the enable flag alone
+// gates it.
+const ALLOW_TRIGGER_CALLBACK = (process.env.HAIFLOW_ALLOW_TRIGGER_CALLBACK ?? "false").toLowerCase() === "true";
+const CALLBACK_ALLOW_HOSTS = (process.env.HAIFLOW_CALLBACK_ALLOW_HOSTS ?? "")
+  .split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
 
 // Watchdog: a session can otherwise sit busy forever if Claude wedges on a
 // permission prompt the model can't auto-answer — the Stop hook never fires,
@@ -114,6 +152,25 @@ const STARTED_AT = new Date().toISOString();
 if (!API_KEY) {
   console.error("HAIFLOW_API_KEY is required. Set it in your .env or environment.");
   process.exit(1);
+}
+
+// Production hardening: fail closed on an insecure exposure before serving.
+if (IS_PROD) {
+  if (IS_PUBLIC_BIND && !ALLOW_PUBLIC_BIND) {
+    console.error(
+      `FATAL: refusing to bind ${HOST} in production without a front layer.\n` +
+      `Keep haiflow on loopback (127.0.0.1) behind Cloudflare Access / Tailscale (see DEPLOYMENT.md),\n` +
+      `or set HAIFLOW_ALLOW_PUBLIC_BIND=true if you firewall the port and run your own identity layer.`,
+    );
+    process.exit(1);
+  }
+  if (API_KEY.length < 24 || WEAK_KEYS.has(API_KEY.toLowerCase())) {
+    console.error(
+      "FATAL: HAIFLOW_API_KEY is too weak for production.\n" +
+      "Use a random secret of at least 24 characters (e.g. `openssl rand -hex 32`), not a placeholder.",
+    );
+    process.exit(1);
+  }
 }
 
 mkdirSync(BASE_DIR, { recursive: true });
@@ -216,6 +273,10 @@ interface State {
   deadlineAt?: string;
   transcriptPath?: string;
   currentDedupKey?: string;
+  // Fire-and-forget metadata for the running task: where to POST the result on
+  // completion, and whether to stop the session afterwards.
+  currentCallbackUrl?: string;
+  currentEphemeral?: boolean;
   // Set while a human holds the wheel via the writable terminal, so auto-drain
   // doesn't fire a queued prompt on top of their typing.
   intervened?: boolean;
@@ -231,6 +292,8 @@ interface QueueItem {
   priority?: number;     // higher drains first; default 0
   dedupKey?: string;     // a second enqueue with the same key is dropped
   notBefore?: string;    // ISO time before which the item is not eligible
+  callbackUrl?: string;  // POST the result here when this item completes
+  ephemeral?: boolean;   // stop the session after this item completes
 }
 
 // --- Pipeline types ---
@@ -399,6 +462,54 @@ function postWebhook(wh: WebhookSubscriber, payload: object): Promise<Response> 
     headers: { "Content-Type": "application/json", ...wh.headers },
     body: JSON.stringify(payload),
   });
+}
+
+// Validate a per-trigger completion callback URL. Gated off by default; an
+// optional host allowlist restricts targets further. Keeps the SSRF surface
+// closed unless an operator opts in.
+function validateCallbackUrl(url: string): { ok: boolean; reason?: string } {
+  if (!ALLOW_TRIGGER_CALLBACK) {
+    return { ok: false, reason: "trigger callbacks are disabled (set HAIFLOW_ALLOW_TRIGGER_CALLBACK=true)" };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, reason: "callbackUrl is not a valid URL" };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { ok: false, reason: "callbackUrl must be http(s)" };
+  }
+  if (CALLBACK_ALLOW_HOSTS.length > 0 && !CALLBACK_ALLOW_HOSTS.includes(parsed.hostname.toLowerCase())) {
+    return { ok: false, reason: `callbackUrl host '${parsed.hostname}' is not in HAIFLOW_CALLBACK_ALLOW_HOSTS` };
+  }
+  return { ok: true };
+}
+
+// POST a finished task's (already-redacted) result to its trigger callback. Best
+// effort: a failed delivery is logged, never thrown, so it can't wedge the Stop
+// hook or the session lifecycle.
+async function fireTriggerCallback(
+  url: string, session: string, taskId: string,
+  saved: { messages: string[]; completed_at: string },
+  model: string | null, usage: TaskUsage | null,
+) {
+  try {
+    const payload = {
+      event: "task.completed",
+      id: taskId,
+      session,
+      status: "completed",
+      messages: saved.messages,
+      model,
+      usage,
+      completedAt: saved.completed_at,
+    };
+    const res = await postWebhook({ url }, payload);
+    log("info", "trigger_callback_delivered", { session, taskId, url, status: res.status });
+  } catch (err) {
+    log("warn", "trigger_callback_failed", { session, taskId, url, error: String(err) });
+  }
 }
 
 async function deliverToWebhooks(
@@ -723,29 +834,32 @@ function sendInterrupt(session: string, mode: "escape" | "ctrl-c" = "escape"): b
 // of the task — including intermediate prose, not only the final answer. This
 // is intentionally more complete than the old jq (which started at the last
 // tool_result); consumers like the GitHub bridge join all blocks.
-function saveResponse(session: string, taskId: string, prompt?: string, messages?: string[], lastMessage?: string) {
+// Returns the (redacted) record written, so callers like the completion callback
+// can use it directly instead of reading the file back off disk.
+function saveResponse(session: string, taskId: string, prompt?: string, messages?: string[], lastMessage?: string): { messages: string[]; completed_at: string } | undefined {
   if (!taskId) return;
   const file = responseFile(session, taskId);
+  const completed_at = new Date().toISOString();
 
   if (messages && messages.length > 0) {
     let redactions = 0;
     const safe = messages.map((m) => { const r = redactOut(String(m)); redactions += r.count; return r.text; });
     writeFileSync(file, JSON.stringify({
-      id: taskId, completed_at: new Date().toISOString(), prompt, messages: safe,
+      id: taskId, completed_at, prompt, messages: safe,
       ...(redactions > 0 ? { redactions } : {}),
     }, null, 2));
     log("info", "response_saved", { session, taskId, source: "transcript", redactions });
-    return;
+    return { messages: safe, completed_at };
   }
 
   if (lastMessage) {
     const r = redactOut(lastMessage);
     writeFileSync(file, JSON.stringify({
-      id: taskId, completed_at: new Date().toISOString(), prompt, messages: [r.text],
+      id: taskId, completed_at, prompt, messages: [r.text],
       ...(r.count > 0 ? { redactions: r.count } : {}),
     }, null, 2));
     log("info", "response_saved", { session, taskId, source: "fallback", redactions: r.count });
-    return;
+    return { messages: [r.text], completed_at };
   }
 
   // Neither the transcript nor a last_assistant_message yielded text (e.g. the
@@ -753,10 +867,10 @@ function saveResponse(session: string, taskId: string, prompt?: string, messages
   // completion so pollers on /responses/:id and SSE streams see the task finish
   // instead of hanging until their timeout (which surfaces to the GitHub bridge
   // as a false "still working" reply).
-  writeFileSync(file, JSON.stringify({
-    id: taskId, completed_at: new Date().toISOString(), prompt, messages: ["(no text output)"],
-  }, null, 2));
+  const empty = ["(no text output)"];
+  writeFileSync(file, JSON.stringify({ id: taskId, completed_at, prompt, messages: empty }, null, 2));
   log("info", "response_saved", { session, taskId, source: "empty" });
+  return { messages: empty, completed_at };
 }
 
 function drainQueue(session: string) {
@@ -780,6 +894,8 @@ function drainQueue(session: string) {
     currentTaskId: next.id,
     currentChain: next.chain,
     currentDedupKey: next.dedupKey,
+    currentCallbackUrl: next.callbackUrl,
+    currentEphemeral: next.ephemeral,
     deadlineAt: taskDeadline(),
   });
   recordTaskStart({ id: next.id, session, prompt: next.prompt, source: next.source ?? "queue", chain: next.chain });
@@ -839,11 +955,11 @@ async function waitForGuardrailComplete(session: string, maxWait = 30_000): Prom
   log("warn", "guardrail_idle_timeout", { session });
 }
 
-async function startClaudeSession(session: string, cwd: string): Promise<{ success: boolean; error?: string }> {
+async function startClaudeSession(session: string, cwd: string): Promise<{ success: boolean; error?: string; ready?: boolean }> {
   if (isTmuxRunning(session)) {
     log("info", "session_reused", { session });
     writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
-    return { success: true };
+    return { success: true, ready: true };
   }
 
   // Fail fast (and clearly) if the Claude CLI isn't installed. Otherwise tmux
@@ -873,22 +989,35 @@ async function startClaudeSession(session: string, cwd: string): Promise<{ succe
   // fires early in boot before the input box is mounted — hook-only checks
   // aren't enough, so we also require the prompt line to appear in the pane.
   const target = tmuxName(session);
-  const maxWait = 15_000;
   const start = Date.now();
-  while (Date.now() - start < maxWait) {
+  while (Date.now() - start < START_READY_TIMEOUT_MS) {
     if (getSessionId(session) && isTuiInteractive(target)) {
       log("info", "session_started", { session, cwd, readyMs: Date.now() - start });
       injectGuardrailCommand(session);
       await waitForGuardrailComplete(session);
-      return { success: true };
+      return { success: true, ready: true };
     }
     await Bun.sleep(100);
   }
 
-  log("info", "session_started", { session, cwd, note: "ready timeout — session may still be initializing" });
+  // Timed out waiting for full readiness. The decisive signal is whether the
+  // SessionStart hook linked a Claude session id: without it the Stop hook can
+  // never match this session, so every response would be silently lost (the
+  // consumer's trigger "succeeds" but the answer never comes back). That is the
+  // #1 silent setup failure — hooks not wired. Treat it as a hard failure and
+  // tear down the dead pane instead of reporting a healthy start. If the id DID
+  // link but the `❯` heuristic just never matched, the session is usable —
+  // return success but flag ready:false so the caller can tell.
+  if (!getSessionId(session)) {
+    log("error", "session_start_unlinked", { session, cwd, note: "SessionStart hook never fired — Claude hooks are likely not wired" });
+    stopClaudeSession(session);
+    return { success: false, error: "session did not link within timeout — Claude hooks are likely not wired (run `haiflow setup`)" };
+  }
+
+  log("warn", "session_started", { session, cwd, ready: false, note: "linked but TUI readiness unconfirmed — proceeding" });
   injectGuardrailCommand(session);
   await waitForGuardrailComplete(session);
-  return { success: true };
+  return { success: true, ready: false };
 }
 
 function isTuiInteractive(target: string): boolean {
@@ -1070,6 +1199,7 @@ interface TerminalWSData {
 
 const server = Bun.serve({
   port: PORT,
+  hostname: HOST,
   routes: {
     "/sessions": {
       GET: authed(() => Response.json(listSessions())),
@@ -1133,6 +1263,18 @@ const server = Bun.serve({
           return Response.json({ error: `Prompt rejected: ${validation.reason}` }, { status: 400 });
         }
 
+        // Fire-and-forget options (any combination; both default off):
+        //   ephemeral    — auto-start the session if it's offline (needs a cwd),
+        //                  and stop it again once this task responds.
+        //   callbackUrl  — POST the result to this URL on completion (gated).
+        const ephemeral = body.ephemeral === true;
+        const callbackUrl = typeof body.callbackUrl === "string" ? body.callbackUrl.trim() : undefined;
+        const requestedCwd = typeof body.cwd === "string" ? body.cwd : undefined;
+        if (callbackUrl) {
+          const v = validateCallbackUrl(callbackUrl);
+          if (!v.ok) return Response.json({ error: v.reason, session }, { status: 400 });
+        }
+
         const { priority, dedupKey, notBefore } = queueOptions(body);
 
         // Drop duplicates (e.g. a webhook that fired twice) before doing anything.
@@ -1141,13 +1283,27 @@ const server = Bun.serve({
           return Response.json({ id, session, deduped: true, message: "A task with this dedupKey is already running or queued." });
         }
 
-        const state = readState(session);
+        let state = readState(session);
+        let autoStarted = false;
 
         if (state.status === "offline") {
-          return Response.json(
-            { error: `Session '${session}' is offline. Start it with POST /session/start` },
-            { status: 503 }
-          );
+          // A non-ephemeral offline trigger stays an error the caller fixes.
+          if (!ephemeral) {
+            return Response.json(
+              { error: `Session '${session}' is offline. Start it with POST /session/start`, session },
+              { status: 503 }
+            );
+          }
+          // Fire-and-forget: bring the session up for this one task. Same cwd
+          // policy as /session/start so messages and overrides stay consistent.
+          const { cwd, error } = resolveStartCwd(requestedCwd);
+          if (error) return Response.json({ error, session }, { status: 400 });
+          const started = await startClaudeSession(session, cwd!);
+          if (!started.success) {
+            return Response.json({ error: started.error, session }, { status: 503 });
+          }
+          autoStarted = true;
+          state = readState(session);
         }
 
         const delayed = notBefore ? Date.parse(notBefore) > Date.now() : false;
@@ -1156,7 +1312,7 @@ const server = Bun.serve({
         // and the next drain pick it up when notBefore passes).
         if (state.status === "busy" || delayed) {
           const queue = readQueue(session);
-          queue.push({ id, prompt, addedAt: new Date().toISOString(), source, priority, dedupKey, notBefore });
+          queue.push({ id, prompt, addedAt: new Date().toISOString(), source, priority, dedupKey, notBefore, callbackUrl, ephemeral: ephemeral || undefined });
           writeQueue(session, queue);
           log("info", "trigger_queued", { session, taskId: id, position: queue.length, priority, delayed });
           return Response.json({
@@ -1172,6 +1328,8 @@ const server = Bun.serve({
           currentPrompt: prompt,
           currentTaskId: id,
           currentDedupKey: dedupKey,
+          currentCallbackUrl: callbackUrl,
+          currentEphemeral: ephemeral || undefined,
           deadlineAt: taskDeadline(),
         });
         recordTaskStart({ id, session, prompt, source: source ?? "trigger" });
@@ -1183,8 +1341,13 @@ const server = Bun.serve({
           return Response.json({ error: "Failed to send to tmux session" }, { status: 500 });
         }
 
-        log("info", "trigger_sent", { session, taskId: id });
-        return Response.json({ id, session, sent: true, prompt });
+        log("info", "trigger_sent", { session, taskId: id, ephemeral, autoStarted, callback: !!callbackUrl });
+        return Response.json({
+          id, session, sent: true, prompt,
+          ...(autoStarted ? { autoStarted: true } : {}),
+          ...(ephemeral ? { ephemeral: true } : {}),
+          ...(callbackUrl ? { callbackScheduled: true } : {}),
+        });
       }),
     },
 
@@ -1810,7 +1973,7 @@ const server = Bun.serve({
           const extract = (body.transcript_path && isAllowedTranscriptPath(body.transcript_path))
             ? extractFromTranscript(body.transcript_path)
             : null;
-          saveResponse(session, state.currentTaskId, state.currentPrompt, extract?.messages, body.last_assistant_message);
+          const saved = saveResponse(session, state.currentTaskId, state.currentPrompt, extract?.messages, body.last_assistant_message);
 
           recordTaskFinish({
             id: state.currentTaskId,
@@ -1841,13 +2004,44 @@ const server = Bun.serve({
           // Map-reduce: if this task was a map shard, collect its output and
           // fire the reducer once the whole run is in.
           collectMapResult(state.currentTaskId, responseText);
+
+          // Fire-and-forget: deliver the result to the caller's callback URL.
+          // Deferred past this response (same reason as the ephemeral teardown
+          // below): a slow or dead callback host must not block the Stop hook,
+          // and thus the session returning to idle and the next task draining.
+          if (state.currentCallbackUrl && saved) {
+            const callbackUrl = state.currentCallbackUrl;
+            const callbackTaskId = state.currentTaskId;
+            const model = extract?.model ?? null;
+            const usage = extract?.usage ?? null;
+            setImmediate(() => fireTriggerCallback(callbackUrl, session, callbackTaskId, saved, model, usage));
+          }
         }
 
         writeState(session, {
           status: "idle", since: new Date().toISOString(),
           waiting: false, waitingMessage: undefined, waitingSince: undefined, deadlineAt: undefined,
+          currentCallbackUrl: undefined, currentEphemeral: undefined,
         });
-        drainQueue(session);
+
+        // Fire-and-forget: if the finished task asked for an ephemeral session
+        // and nothing else is queued, stop it. The Stop hook request is made by a
+        // curl child of the Claude session we're about to kill, so killing it
+        // inline would tear down the very connection we're responding on (and
+        // segfaults the runtime). setImmediate runs the teardown on the next
+        // event-loop iteration — after this response has been written — so the
+        // hook gets its reply before its sender is killed. (No timed delay: the
+        // teardown is sequenced after the response, not after a fixed wait.)
+        if (state.currentEphemeral && readQueue(session).length === 0) {
+          const ephemeralSession = session;
+          const ephemeralTaskId = state.currentTaskId;
+          setImmediate(() => {
+            stopClaudeSession(ephemeralSession);
+            log("info", "ephemeral_session_stopped", { session: ephemeralSession, taskId: ephemeralTaskId });
+          });
+        } else {
+          drainQueue(session);
+        }
         log("info", "hook_stop", { session, taskId: state.currentTaskId });
 
         return Response.json({ ok: true });
@@ -1908,27 +2102,26 @@ const server = Bun.serve({
         const session = sanitizeSession((body.session as string) || "default");
         const requestedCwd = body.cwd as string | undefined;
 
-        let cwd: string;
-        if (FORCED_CWD) {
-          if (requestedCwd && requestedCwd !== FORCED_CWD) {
-            log("warn", "session_start_cwd_overridden", { session, requested: requestedCwd, forced: FORCED_CWD });
+        const { cwd, error, overridden } = resolveStartCwd(requestedCwd);
+        if (error) {
+          if (!FORCED_CWD && !ALLOW_REQUEST_CWD) {
+            log("warn", "session_start_rejected", { session, reason: "request cwd disabled and HAIFLOW_CWD unset" });
           }
-          cwd = FORCED_CWD;
-        } else if (!ALLOW_REQUEST_CWD) {
-          log("warn", "session_start_rejected", { session, reason: "request cwd disabled and HAIFLOW_CWD unset" });
-          return Response.json({ error: "cwd from request is disabled; set HAIFLOW_CWD on the server" }, { status: 400 });
-        } else {
-          if (!requestedCwd) {
-            return Response.json({ error: "cwd is required" }, { status: 400 });
-          }
-          cwd = requestedCwd;
+          return Response.json({ error, session }, { status: 400 });
+        }
+        if (overridden) {
+          log("warn", "session_start_cwd_overridden", { session, requested: requestedCwd, forced: FORCED_CWD });
         }
 
-        const result = await startClaudeSession(session, cwd);
+        const result = await startClaudeSession(session, cwd!);
         if (!result.success) {
-          return Response.json({ error: result.error }, { status: 409 });
+          return Response.json({ error: result.error, session }, { status: 409 });
         }
-        return Response.json({ started: true, session, tmux: tmuxName(session), cwd });
+        return Response.json({
+          started: true, session, tmux: tmuxName(session), cwd,
+          ready: result.ready ?? true,
+          ...(overridden ? { cwdOverridden: true } : {}),
+        });
       }),
     },
 
@@ -1943,7 +2136,7 @@ const server = Bun.serve({
 
         const result = stopClaudeSession(session);
         if (!result.success) {
-          return Response.json({ error: result.error }, { status: 404 });
+          return Response.json({ error: result.error, session }, { status: 404 });
         }
         return Response.json({ stopped: true, session });
       }),
@@ -2171,7 +2364,14 @@ for (const dir of readdirSync(BASE_DIR).filter((d) => existsSync(`${BASE_DIR}/${
 const sweptPrompts = sweepStalePromptFiles();
 if (sweptPrompts > 0) log("info", "stale_prompts_swept", { count: sweptPrompts });
 
-log("info", "server_started", { port: server.port, auth: !!API_KEY });
+if (IS_PUBLIC_BIND && !IS_PROD) {
+  log("warn", "public_bind_dev", { host: HOST, note: "bound to a public interface in development — do not use this in production" });
+} else if (IS_PROD && IS_PUBLIC_BIND) {
+  log("warn", "public_bind_acknowledged", { host: HOST, note: "public bind acknowledged — ensure a firewall and identity layer front this port (DEPLOYMENT.md)" });
+} else if (IS_PROD) {
+  log("info", "loopback_origin", { host: HOST, note: "production origin is loopback-only — reach it via a tunnel/identity layer (DEPLOYMENT.md)" });
+}
+log("info", "server_started", { host: HOST, port: server.port, env: ENV, auth: !!API_KEY });
 log("info", "sessions_recovered", { sessions: listSessions() });
 
 installGuardrailSkill();

@@ -17,6 +17,10 @@ curl -X POST http://localhost:3333/session/start \
 | `cwd` | string | **Yes** | Working directory for Claude |
 | `session` | string | No | Session name (default: `"default"`) |
 
+Returns `{ "started": true, "session": "worker", "tmux": "worker", "cwd": "...", "ready": true }`. `ready` is `false` when the session linked but its TUI readiness could not be confirmed in time (still usable). When the server has a forced `HAIFLOW_CWD` that differs from the requested `cwd`, the response also includes `"cwdOverridden": true` and `cwd` reflects the forced value.
+
+If the session never links a Claude session id within `HAIFLOW_START_READY_TIMEOUT_MS` (default 15000) — almost always because the Claude hooks are not wired — the dead pane is torn down and the call returns `409` with `{ "error": "...hooks are likely not wired (run `haiflow setup`)", "session": "..." }` rather than reporting a healthy start that would silently drop every response. Run `haiflow setup` / `haiflow doctor` to wire and verify hooks.
+
 ## `POST /session/stop`
 
 Kill a Claude tmux session.
@@ -89,12 +93,46 @@ curl -X POST http://localhost:3333/trigger \
 | `dedupKey` | string | No | A second enqueue with the same key (while one is running or queued) is dropped |
 | `delaySeconds` | number | No | Schedule the task for later. The drain picks it up once due, even on an idle session |
 | `notBefore` | string | No | ISO timestamp form of `delaySeconds` (takes precedence if both given) |
+| `ephemeral` | boolean | No | Fire-and-forget: if the session is offline, auto-start it (needs `cwd`), then **stop it again** once this task responds. See below |
+| `cwd` | string | No | Working directory used only when `ephemeral` auto-starts an offline session |
+| `callbackUrl` | string | No | POST the result here when the task completes (must be enabled server-side). See below |
 
 Responses:
-- **Idle**: `{"id": "...", "sent": true}` — sent immediately
+- **Idle**: `{"id": "...", "sent": true}` — sent immediately. With fire-and-forget options: `autoStarted`, `ephemeral`, and `callbackScheduled` flags are echoed back when set
 - **Busy** (or scheduled): `{"id": "...", "queued": true, "position": 1}` — auto-sends when idle / due
 - **Duplicate**: `{"id": "...", "deduped": true}` — dropped, a task with that `dedupKey` is already in flight
-- **Offline**: `503` error
+- **Offline**: `503` error (unless `ephemeral` auto-starts it)
+
+### Fire-and-forget (`ephemeral` + `callbackUrl`)
+
+The two options are independent — use one, both, or neither.
+
+- **`ephemeral: true`** turns a single `/trigger` into a self-contained job: if the session is offline it is auto-started with `cwd` (the call returns `400` if no `cwd` is resolvable), the prompt runs, and the session is stopped once it responds — but only if nothing else is queued, so it never abandons queued work.
+- **`callbackUrl`** registers a completion webhook for that task. When it finishes, haiflow POSTs:
+
+  ```json
+  {
+    "event": "task.completed",
+    "id": "task-001",
+    "session": "worker",
+    "status": "completed",
+    "messages": ["..."],
+    "model": "claude-...",
+    "usage": { "totalTokens": 1234, "inputTokens": 1000, "outputTokens": 234, "cacheCreationTokens": 0, "cacheReadTokens": 0 },
+    "completedAt": "2026-06-28T10:00:00.000Z"
+  }
+  ```
+
+  `messages` are redacted by the same egress pass as every other outbound payload. Delivery is best-effort (a failed POST is logged, never retried inline, and never blocks the session).
+
+  Because an arbitrary callback URL is an SSRF surface, this is **off by default**. Enable it with `HAIFLOW_ALLOW_TRIGGER_CALLBACK=true`, and optionally restrict targets with `HAIFLOW_CALLBACK_ALLOW_HOSTS=host1,host2`. With callbacks disabled, a `callbackUrl` returns `400`.
+
+```bash
+# One-shot: bring a session up, run a task, POST the result, tear the session down.
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" -H "Content-Type: application/json" \
+  -d '{"prompt": "summarize recent commits", "session": "oneshot", "cwd": "/path/to/project", "ephemeral": true, "callbackUrl": "https://my-app.example.com/haiflow-done"}'
+```
 
 ### `POST /queue/:id`
 
@@ -102,7 +140,7 @@ Re-prioritise a queued item: `{ "priority": 9 }`. Returns `404` if the id is not
 
 ## `GET /responses/:id`
 
-Get the response for a completed task.
+Get the response for a completed task. Pass `?session=` (default `"default"`) to match the session the task was triggered on.
 
 ```bash
 curl -s "http://localhost:3333/responses/task-001?session=worker" | jq .
@@ -131,6 +169,7 @@ curl -N "http://localhost:3333/responses/task-001/stream?session=worker"
 
 | Param | Default | Description |
 |-------|---------|-------------|
+| `session` | `"default"` | Session that owns the task. **Pass the same session you triggered on** — omitting it silently streams the `"default"` session's responses |
 | `timeout` | `300` | Max seconds to wait (capped at 600) |
 
 Events:
