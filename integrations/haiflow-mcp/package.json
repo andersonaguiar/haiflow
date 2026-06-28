@@ -1,0 +1,17 @@
+{
+  "name": "haiflow-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing haiflow's Claude Code orchestration as tools for any MCP-capable agent",
+  "type": "module",
+  "module": "index.ts",
+  "bin": {
+    "haiflow-mcp": "index.ts"
+  },
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "3.25.76"
+  }
+}
