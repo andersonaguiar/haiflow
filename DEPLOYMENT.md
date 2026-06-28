@@ -162,3 +162,5 @@ cloudflared tunnel run --loglevel debug haiflow
 | **Tailscale Funnel** | No domain needed, mesh VPN | Only your Tailscale network can reach it |
 | **ngrok + IP restrictions** | Quick setup | Paid for static domains, no identity layer |
 | **VPS + Caddy + firewall** | Full control, always-on | More setup, manage Claude Code auth remotely |
+
+For a full server walk-through (DigitalOcean, Hetzner, any Ubuntu VPS) with a one-shot provisioning script, see [DEPLOYMENT-droplet.md](DEPLOYMENT-droplet.md).
