@@ -6,7 +6,7 @@ icon: "terminal"
 
 The `haiflow` CLI is the fastest way to drive the orchestrator from your terminal. Use it to install hooks, start and stop Claude Code sessions, send prompts, inspect status, and read responses back.
 
-Most commands are thin clients: they call a running server on `http://localhost:$PORT` and authenticate with `HAIFLOW_API_KEY`. A few commands run entirely in the current process and do not need the server: `serve`, `github`, `setup`, and `version`.
+Most commands are thin clients: they call a running server on `http://localhost:$PORT` and authenticate with `HAIFLOW_API_KEY`. A few commands run entirely in the current process and do not need the server: `serve`, `setup`, and `version`.
 
 <Note>
 Running from source? `bun run bin/haiflow.ts <command>` is equivalent to `haiflow <command>` everywhere in this page.
@@ -17,7 +17,6 @@ Running from source? `bun run bin/haiflow.ts <command>` is equivalent to `haiflo
 | Command | What it does | Talks to server |
 | --- | --- | --- |
 | `serve` | Run the haiflow server in this process. | No (it is the server) |
-| `github` | Run the GitHub webhook bridge in this process. | No |
 | `setup` | Install the Claude Code hooks into `~/.claude/settings.json`. | No |
 | `init [dir]` | One-shot onboarding: install hooks, start a session, verify, smoke-test. | Yes |
 | `doctor [session]` | Report hook and session health. | Yes |
@@ -43,16 +42,6 @@ haiflow serve
 ```
 
 <Tip>For long-running deployments, run `serve` under a process manager rather than a foreground shell. See [Deployment](/deployment).</Tip>
-
-### github
-
-Run the GitHub webhook bridge in this process. The bridge receives GitHub events and turns them into prompts for your sessions.
-
-```bash
-haiflow github
-```
-
-See the [GitHub bridge guide](/guides/github-bridge) for webhook setup and signing.
 
 ### setup
 
@@ -226,7 +215,7 @@ These options are shared across the commands that use them.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `3333` | Port the server listens on. Client commands call `http://localhost:$PORT`. |
-| `HAIFLOW_API_KEY` | none | Bearer token required by the server and the bridges. Set it in the same environment as `serve`, `github`, and any client command. |
+| `HAIFLOW_API_KEY` | none | Bearer token required by the server. Set it in the same environment as `serve` and any client command. |
 
 <Info>
 `HAIFLOW_API_KEY` is a secret you choose to protect your server. It is not a paid Anthropic key: haiflow runs on your existing Claude Code subscription, so there are no per-token API costs.
@@ -271,9 +260,6 @@ haiflow prune --older-than-hours 48
   </Card>
   <Card title="API reference" icon="code" href="/api-reference/introduction">
     The HTTP endpoints behind these commands.
-  </Card>
-  <Card title="GitHub bridge" icon="github" href="/guides/github-bridge">
-    Turn GitHub events into prompts with `haiflow github`.
   </Card>
   <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
     Fix unlinked hooks, stuck sessions, and missing responses.

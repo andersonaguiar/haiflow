@@ -7,7 +7,7 @@ icon: lock
 haiflow runs Claude Code inside a tmux session that has your shell, your `git`, and your `gh`, then exposes an HTTP API to drive it. That is the whole point, and it is also the whole risk: anyone who can get a prompt executed can run code as the operator. This page is the summary of the repository `SECURITY.md`. Read it before you put haiflow anywhere a network can reach.
 
 <Warning>
-The authentication boundaries are the real security perimeter: the API key, the hook localhost restriction, the webhook signatures, and the bridge allowlists. The guardrail skill and redaction are mitigations, not a sandbox. Run haiflow as a dedicated, low-privilege user, scoped to a single project directory (`HAIFLOW_CWD`), and do not expose it to untrusted networks without the controls below.
+The authentication boundaries are the real security perimeter: the API key, the hook localhost restriction, and the webhook signatures. The guardrail skill and redaction are mitigations, not a sandbox. Run haiflow as a dedicated, low-privilege user, scoped to a single project directory (`HAIFLOW_CWD`), and do not expose it to untrusted networks without the controls below.
 </Warning>
 
 ## Threat model
@@ -16,7 +16,7 @@ A prompt that reaches a session executes with the operator's privileges, inside 
 
 Two consequences follow:
 
-- Protect the credentials and signatures that let work in. A leaked `HAIFLOW_API_KEY`, an exposed `/hooks/*` route, an unsigned ingest, or an empty bridge allowlist each hands an attacker the operator's shell.
+- Protect the credentials and signatures that let work in. A leaked `HAIFLOW_API_KEY`, an exposed `/hooks/*` route, or an unsigned ingest each hands an attacker the operator's shell.
 - Limit the blast radius. Give the process its own user account and lock it to one project directory, so a successful prompt cannot reach the rest of the machine even if a mitigation is bypassed.
 
 ## Trust boundaries
@@ -25,11 +25,10 @@ Each surface that accepts input has its own control. Know which is which.
 
 | Surface | Control |
 | --- | --- |
-| HTTP API (`/trigger`, `/session/*`, `/map`, `/publish`, ...) | Bearer `HAIFLOW_API_KEY`, compared in constant time. This is the root credential: anyone holding it can run code in your sessions. |
+| HTTP API (`/trigger`, `/session/*`, `/publish`, ...) | Bearer `HAIFLOW_API_KEY`, compared in constant time. This is the root credential: anyone holding it can run code in your sessions. |
 | Claude Code hooks (`/hooks/*`) | Restricted to localhost. Requests carrying reverse-proxy headers (`X-Forwarded-For`, `CF-Connecting-IP`) are rejected, so a tunnel or proxy cannot reach them. |
 | Inbound webhooks (`/ingest/:source`) | Not bearer-authenticated by design. Authenticity is a per-source HMAC signature over the raw body. |
 | Take-the-wheel terminal (`GET /terminal?mode=control`) | API key plus the `HAIFLOW_ALLOW_TAKEOVER` kill-switch. The read-only view is always available. |
-| GitHub bridge (`haiflow github`) | `X-Hub-Signature-256` HMAC, plus `GITHUB_ALLOWED_REPOS` and `GITHUB_ALLOWED_SENDERS` allowlists. |
 
 <AccordionGroup>
   <Accordion title="HTTP API: the root credential" icon="key">
@@ -52,11 +51,6 @@ Each surface that accepts input has its own control. Know which is which.
     `GET /terminal?mode=control` is a writable PTY. It bypasses the structural prompt checks and the guardrail skill, so it is gated by the API key and the `HAIFLOW_ALLOW_TAKEOVER` kill-switch. The read-only view is always available.
 
     Known limitation: the key is passed as a URL query parameter, which is capturable by reverse-proxy and browser logs. Only expose `/terminal` over localhost or a trusted tunnel, or set `HAIFLOW_ALLOW_TAKEOVER=false`. See [Dashboard](/guides/dashboard).
-  </Accordion>
-  <Accordion title="GitHub bridge: signature plus allowlists" icon="github">
-    `haiflow github` verifies the `X-Hub-Signature-256` HMAC and fails closed on `GITHUB_ALLOWED_REPOS` and `GITHUB_ALLOWED_SENDERS`. Both must match for the bridge to act, so an unlisted repo or sender is dropped.
-
-    Known limitation: the standalone bridge has no replay nonce of its own and relies on queue-level dedup. For persistent replay protection, use the `/ingest github` recipe instead. See [GitHub bridge](/guides/github-bridge).
   </Accordion>
 </AccordionGroup>
 
@@ -100,7 +94,6 @@ Work through these before exposing haiflow beyond your own loopback.
 4. Leave `HAIFLOW_GUARDRAILS` and `HAIFLOW_REDACT` on.
 5. If you do not need the writable browser terminal, set `HAIFLOW_ALLOW_TAKEOVER=false`. If you do, keep `/terminal` localhost-only.
 6. Run the signed-webhook gateway with Redis available so replay protection is active. It fails closed otherwise.
-7. For chat and webhook bridges, configure the allowlists. They fail closed, so an empty allowlist serves no one.
 
 <Check>
 Pair this list with [Deployment](/deployment), which fails closed at boot in production mode on an insecure exposure or a weak key.
@@ -132,8 +125,5 @@ curl http://localhost:3333/version \
   </Card>
   <Card title="Inbound webhooks" icon="shield-halved" href="/guides/inbound-webhooks">
     Signature verification, replay nonces, and rate limits in detail.
-  </Card>
-  <Card title="GitHub bridge" icon="github" href="/guides/github-bridge">
-    Allowlists, signature checks, and the persistent-replay recipe.
   </Card>
 </CardGroup>

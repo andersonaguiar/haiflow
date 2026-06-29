@@ -15,8 +15,8 @@ docs/
 ├── installation.mdx
 ├── configuration.mdx
 ├── concepts/                  # Architecture, sessions, queueing, ledger, context
-├── guides/                    # CLI, dashboard, pipelines, pools, webhooks, security guides
-├── integrations/              # MCP server, n8n nodes
+├── guides/                    # CLI, dashboard, pipelines, webhooks, security guides
+├── integrations/              # MCP server
 ├── api-reference/             # API overview (endpoints auto-generated from openapi.json)
 ├── deployment.mdx
 ├── security.mdx

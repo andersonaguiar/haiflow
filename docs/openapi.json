@@ -3,7 +3,7 @@
   "info": {
     "title": "haiflow API",
     "version": "0.1.0",
-    "description": "HTTP orchestrator for Claude Code. Start Claude Code sessions in tmux, trigger prompts, queue work, stream and capture responses, fan out across worker pools, and chain agents with pub/sub.\n\nEvery endpoint except `GET /health`, `GET /version`, the `POST /hooks/*` callbacks, and `POST /ingest/{source}` requires an `Authorization: Bearer <HAIFLOW_API_KEY>` header. `HAIFLOW_API_KEY` is a secret you define, not an Anthropic/Claude paid key.",
+    "description": "HTTP orchestrator for Claude Code. Start Claude Code sessions in tmux, trigger prompts, queue work, stream and capture responses, and chain agents with pub/sub.\n\nEvery endpoint except `GET /health`, `GET /version`, the `POST /hooks/*` callbacks, and `POST /ingest/{source}` requires an `Authorization: Bearer <HAIFLOW_API_KEY>` header. `HAIFLOW_API_KEY` is a secret you define, not an Anthropic/Claude paid key.",
     "license": {
       "name": "MIT",
       "url": "https://github.com/andersonaguiar/haiflow/blob/main/LICENSE"
@@ -35,7 +35,6 @@
     { "name": "Queue", "description": "Inspect and manage a session's pending prompt queue." },
     { "name": "Tasks", "description": "The durable task ledger: what each task ran, changed, spent, and how long it took." },
     { "name": "Usage & Savings", "description": "Measured token consumption and the equivalent API cost avoided." },
-    { "name": "Pools & Map-Reduce", "description": "Load-balance and fan work across a pool of member sessions, then reduce." },
     { "name": "Pipeline", "description": "Event-driven agent chains over pub/sub topics." },
     { "name": "Webhooks", "description": "Signed inbound webhook gateway: drive tasks from a SaaS webhook without sharing your bearer key." },
     { "name": "System", "description": "Health, version, and diagnostics." }
@@ -787,143 +786,6 @@
         }
       }
     },
-    "/pool/{name}/trigger": {
-      "post": {
-        "tags": ["Pools & Map-Reduce"],
-        "summary": "Load-balance a prompt across a pool",
-        "operationId": "poolTrigger",
-        "description": "Send one prompt to a pool defined in `pipeline.json`. It goes to an idle member, or the least-loaded member's queue.",
-        "parameters": [
-          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" }, "example": "reviewers" }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["prompt"],
-                "properties": {
-                  "prompt": { "type": "string", "example": "review the latest diff" },
-                  "id": { "type": "string", "description": "Custom task id (auto-generated if omitted)." },
-                  "source": { "type": "string", "description": "Trigger source label (defaults to `pool:<name>`)." },
-                  "priority": { "type": "number", "description": "Queue priority if the prompt is queued behind a member's work." }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Dispatched to a member.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "pool": { "type": "string", "example": "reviewers" },
-                    "member": { "type": "string", "example": "reviewer-2" },
-                    "id": { "type": "string", "example": "task_..." },
-                    "where": { "type": "string", "enum": ["sent", "queued", "queued_offline"], "example": "sent" }
-                  }
-                }
-              }
-            }
-          },
-          "400": { "description": "`prompt` is required or was rejected by structural checks." },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "description": "Unknown pool." },
-          "413": { "description": "`prompt` exceeds the 512KB limit." }
-        }
-      }
-    },
-    "/map": {
-      "post": {
-        "tags": ["Pools & Map-Reduce"],
-        "summary": "Map items across a pool, then reduce",
-        "operationId": "map",
-        "description": "Fan a list of items across a pool in parallel, then fire a reducer once every item has come back (the fan-in / JOIN). If a shard never returns, the reducer fires with partial results after `HAIFLOW_MAP_TIMEOUT_SEC` (default 1800).",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["items", "pool", "mapTemplate"],
-                "properties": {
-                  "items": { "type": "array", "items": {}, "description": "Items to map over (strings, or objects stringified into `{{item}}`). Capped at `HAIFLOW_MAP_MAX_ITEMS` (200).", "example": ["src/a.ts", "src/b.ts", "src/c.ts"] },
-                  "pool": { "type": "string", "description": "Pool name from `pipeline.json`.", "example": "reviewers" },
-                  "mapTemplate": { "type": "string", "description": "Prompt per item. Vars: `{{item}}`, `{{index}}`, `{{total}}`, `{{runId}}`.", "example": "Review {{item}} and list any bugs." },
-                  "reduce": {
-                    "type": "object",
-                    "description": "Optional reducer fired once all items return. The promptTemplate supports `{{results}}` (joined outputs), `{{total}}`, `{{pool}}`, and `{{runId}}`.",
-                    "properties": {
-                      "session": { "type": "string", "example": "lead" },
-                      "promptTemplate": { "type": "string", "example": "Merge these reviews into one report:\n{{results}}" }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Map run started.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "runId": { "type": "string", "example": "map_..." },
-                    "pool": { "type": "string", "example": "reviewers" },
-                    "total": { "type": "integer", "example": 3 },
-                    "reduce": { "type": "boolean" },
-                    "dispatched": { "type": "array", "items": { "type": "object" } }
-                  }
-                }
-              }
-            }
-          },
-          "400": { "description": "Invalid request: invalid JSON, empty `items`, or missing `mapTemplate`." },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "description": "Unknown pool." },
-          "413": { "description": "`items` exceeds `HAIFLOW_MAP_MAX_ITEMS` (default 200)." }
-        }
-      }
-    },
-    "/map/{runId}": {
-      "get": {
-        "tags": ["Pools & Map-Reduce"],
-        "summary": "Get map run progress",
-        "operationId": "getMapRun",
-        "parameters": [
-          { "name": "runId", "in": "path", "required": true, "schema": { "type": "string" }, "example": "map_..." }
-        ],
-        "responses": {
-          "200": {
-            "description": "Progress of the map run.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "runId": { "type": "string" },
-                    "pool": { "type": "string" },
-                    "total": { "type": "integer" },
-                    "collected": { "type": "integer" },
-                    "reduced": { "type": "boolean" },
-                    "reduceTaskId": { "type": "string" }
-                  }
-                }
-              }
-            }
-          },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "description": "Unknown run id." }
-        }
-      }
-    },
     "/pipeline": {
       "get": {
         "tags": ["Pipeline"],
@@ -940,7 +802,6 @@
                   "properties": {
                     "topics": { "type": "object", "additionalProperties": true },
                     "emitters": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
-                    "pools": { "type": "object", "additionalProperties": true },
                     "redis": { "type": "boolean", "example": true },
                     "recentEvents": { "type": "array", "items": { "$ref": "#/components/schemas/PipelineEvent" } }
                   }
@@ -975,7 +836,7 @@
         "tags": ["Pipeline"],
         "summary": "Publish a pipeline event",
         "operationId": "publish",
-        "description": "Publish an event to a pipeline topic. Useful for external systems (n8n, scripts) to inject work into the pipeline. The source session is recorded as `external`.",
+        "description": "Publish an event to a pipeline topic. Useful for external systems (scripts) to inject work into the pipeline. The source session is recorded as `external`.",
         "requestBody": {
           "required": true,
           "content": {

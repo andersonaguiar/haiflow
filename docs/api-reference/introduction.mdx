@@ -54,7 +54,7 @@ Most read endpoints default `session` to `default`. Always pass the same `sessio
 | `202` | Accepted but not ready: a task is still `pending` or `queued`. |
 | `400` | Invalid request (bad body, disabled feature, or a value off an allowlist). |
 | `401` | Missing or invalid bearer token. |
-| `404` | Unknown session, task, topic, pool, or queued item. |
+| `404` | Unknown session, task, topic, or queued item. |
 | `409` | Conflict: a session that could not link its hooks, or a replayed webhook. |
 | `429` | Rate limited (the `/ingest` gateway). A `Retry-After` header is included. |
 | `503` | Unavailable: the target session is offline, or the ingest gateway is failing closed without Redis. |
@@ -72,9 +72,6 @@ You do not have to call the raw API yourself:
   <Card title="MCP server" icon="plug" href="/integrations/mcp">
     Eight MCP tools for any MCP-capable agent.
   </Card>
-  <Card title="n8n nodes" icon="diagram-project" href="/integrations/n8n">
-    Trigger, Trigger and Wait, sessions, and a pipeline trigger node.
-  </Card>
   <Card title="Dashboard" icon="gauge" href="/guides/dashboard">
     A built-in web UI at `/dashboard`.
   </Card>
@@ -90,7 +87,6 @@ Use the sidebar to browse every endpoint. They are grouped by:
 - **Queue**: inspect and manage pending prompts.
 - **Tasks**: the durable ledger of what each task did.
 - **Usage & Savings**: token consumption and API cost avoided.
-- **Pools & Map-Reduce**: fan-out and reduce across member sessions.
 - **Pipeline**: event-driven agent chains.
 - **Webhooks**: the signed inbound gateway.
 - **System**: health, version, diagnostics.

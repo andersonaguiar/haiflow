@@ -9,7 +9,7 @@ A session is a named, detached tmux session that runs the `claude` CLI in a work
 Sessions are detached, so they keep running after the request that started them returns and survive your terminal closing. You drive them entirely over HTTP, and you can attach a real terminal to watch at any time.
 
 <Note>
-One session runs one Claude Code agent at a time. To run work in parallel, start several named sessions (a [worker pool](/guides/worker-pools)) and fan tasks across them.
+One session runs one Claude Code agent at a time. To run work in parallel, start several named sessions and drive each one independently.
 </Note>
 
 ## Start a session
