@@ -62,15 +62,28 @@ const ALLOW_PUBLIC_BIND = (process.env.HAIFLOW_ALLOW_PUBLIC_BIND ?? "false").toL
 const WEAK_KEYS = new Set(["changeme", "change-me", "secret", "your-secret-key", "your-api-key", "password", "test", "haiflow"]);
 const FORCED_CWD = process.env.HAIFLOW_CWD?.trim() || null;
 const ALLOW_REQUEST_CWD = (process.env.HAIFLOW_ALLOW_REQUEST_CWD ?? "true").toLowerCase() !== "false";
+// Fallback working directory used when a caller omits cwd on /session/start and
+// no HAIFLOW_CWD is pinned. A neutral scratch dir (/tmp) by default, so a bare
+// start never runs in (or exposes) whatever directory the server was launched
+// from. Pass cwd, or set HAIFLOW_CWD, to run in a real project.
+const DEFAULT_CWD = "/tmp";
 
 // Single source of truth for the HAIFLOW_CWD / HAIFLOW_ALLOW_REQUEST_CWD policy,
 // shared by /session/start and the /trigger ephemeral auto-start. Returns the
 // resolved cwd, or an `error` to 400 on, plus whether a server-pinned HAIFLOW_CWD
-// overrode the caller's requested cwd.
-function resolveStartCwd(requestedCwd: string | undefined): { cwd?: string; error?: string; overridden?: boolean } {
+// overrode the caller's requested cwd, or whether the server cwd was used as a
+// fallback. `allowDefault` lets /session/start fall back to DEFAULT_CWD when no
+// cwd is given (cwd is fully optional there); the ephemeral auto-start leaves it
+// off so a fire-and-forget job still names where it runs (or relies on HAIFLOW_CWD).
+function resolveStartCwd(
+  requestedCwd: string | undefined,
+  { allowDefault = false }: { allowDefault?: boolean } = {},
+): { cwd?: string; error?: string; overridden?: boolean; defaulted?: boolean } {
   if (FORCED_CWD) return { cwd: FORCED_CWD, overridden: !!(requestedCwd && requestedCwd !== FORCED_CWD) };
   if (!ALLOW_REQUEST_CWD) return { error: "cwd from request is disabled; set HAIFLOW_CWD on the server" };
-  if (!requestedCwd) return { error: "cwd is required" };
+  if (!requestedCwd) {
+    return allowDefault ? { cwd: DEFAULT_CWD, defaulted: true } : { error: "cwd is required" };
+  }
   return { cwd: requestedCwd };
 }
 const ENABLE_GUARDRAILS = (process.env.HAIFLOW_GUARDRAILS ?? "true").toLowerCase() !== "false";
@@ -2126,7 +2139,7 @@ const server = Bun.serve({
         const session = sanitizeSession((body.session as string) || "default");
         const requestedCwd = body.cwd as string | undefined;
 
-        const { cwd, error, overridden } = resolveStartCwd(requestedCwd);
+        const { cwd, error, overridden, defaulted } = resolveStartCwd(requestedCwd, { allowDefault: true });
         if (error) {
           if (!FORCED_CWD && !ALLOW_REQUEST_CWD) {
             log("warn", "session_start_rejected", { session, reason: "request cwd disabled and HAIFLOW_CWD unset" });
@@ -2135,6 +2148,9 @@ const server = Bun.serve({
         }
         if (overridden) {
           log("warn", "session_start_cwd_overridden", { session, requested: requestedCwd, forced: FORCED_CWD });
+        }
+        if (defaulted) {
+          log("info", "session_start_cwd_defaulted", { session, cwd });
         }
 
         const result = await startClaudeSession(session, cwd!);
@@ -2145,6 +2161,7 @@ const server = Bun.serve({
           started: true, session, tmux: tmuxName(session), cwd,
           ready: result.ready ?? true,
           ...(overridden ? { cwdOverridden: true } : {}),
+          ...(defaulted ? { cwdDefaulted: true } : {}),
         });
       }),
     },

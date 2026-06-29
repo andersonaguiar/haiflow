@@ -452,9 +452,9 @@ haiflow wraps Claude Code in **tmux sessions** and exposes a REST API. It enable
 ### Session Management
 
 **`POST /session/start`** — Start a Claude Code tmux session
-- Body: `{ cwd: string (required), session?: string (default "default") }`
-- Response: `{ started: true, session, tmux, cwd }`
-- Status: 200 (ok), 409 (tmux failed), 400 (missing cwd)
+- Body: `{ cwd?: string (optional; defaults to HAIFLOW_CWD if pinned, else /tmp), session?: string (default "default") }`
+- Response: `{ started: true, session, tmux, cwd, cwdDefaulted? }`
+- Status: 200 (ok), 409 (tmux failed), 400 (cwd sent while HAIFLOW_ALLOW_REQUEST_CWD=false)
 
 **`POST /session/stop`** — Kill a session
 - Body: `{ session?: string }`

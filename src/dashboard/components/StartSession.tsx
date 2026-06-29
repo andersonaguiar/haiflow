@@ -17,11 +17,10 @@ export function StartSession({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!cwd.trim()) { setError("cwd is required"); return; }
     setLoading(true);
     setError("");
     try {
-      const { status, data } = await startSession(name.trim() || "default", cwd.trim());
+      const { status, data } = await startSession(name.trim() || "default", cwd.trim() || undefined);
       if (status >= 400) {
         setError(data.error || "Failed to start");
       } else {
@@ -48,7 +47,7 @@ export function StartSession({
         type="text"
         value={cwd}
         onChange={(e) => { setCwd(e.target.value); setError(""); }}
-        placeholder="Working directory (required)"
+        placeholder="Working directory (optional, defaults to server cwd)"
         className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-500 transition-colors"
         autoFocus
       />

@@ -1,5 +1,9 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { existsSync, rmSync } from "fs";
+import { resolve } from "path";
+
+// Absolute entry so the server can be spawned from a neutral cwd below.
+const SERVER_ENTRY = resolve(import.meta.dir, "../src/index.ts");
 
 const TEST_API_KEY = "test-api-key";
 const authHeaders: Record<string, string> = { "Authorization": `Bearer ${TEST_API_KEY}` };
@@ -13,7 +17,11 @@ async function startServer(extraEnv: Record<string, string>): Promise<{ base: st
   const dataDir = `/tmp/haiflow-cwd-test-${port}`;
   if (existsSync(dataDir)) rmSync(dataDir, { recursive: true });
 
-  activeServer = Bun.spawn(["bun", "run", "src/index.ts"], {
+  activeServer = Bun.spawn(["bun", "run", SERVER_ENTRY], {
+    // Run the server from a neutral dir so an omitted-cwd start (which resolves
+    // to the fixed DEFAULT_CWD = "/tmp") fast-fails instead of linking a real
+    // session in the repo root. The fallback value itself is always "/tmp".
+    cwd: "/tmp",
     env: {
       ...process.env,
       PORT: String(port),
@@ -57,11 +65,16 @@ afterEach(async () => {
 });
 
 describe("session/start cwd config", () => {
-  test("default: request cwd is required", async () => {
+  test("default: cwd is optional and falls back to /tmp", async () => {
     const { base } = await startServer({});
     const { status, data } = await api(base, "/session/start", { session: "t1" });
-    expect(status).toBe(400);
-    expect(data.error).toBe("cwd is required");
+    // cwd is optional now: a missing cwd no longer 400s, it defaults to /tmp.
+    // tmux/claude may still 409 depending on host.
+    expect(status).not.toBe(400);
+    if (status === 200) {
+      expect(data.cwdDefaulted).toBe(true);
+      expect(data.cwd).toBe("/tmp");
+    }
   });
 
   test("HAIFLOW_ALLOW_REQUEST_CWD=false rejects request that omits HAIFLOW_CWD on server", async () => {
@@ -101,10 +114,13 @@ describe("session/start cwd config", () => {
     if (status === 200) expect(data.cwd).toBe("/tmp");
   });
 
-  test("HAIFLOW_ALLOW_REQUEST_CWD=true (explicit) preserves default behaviour", async () => {
+  test("HAIFLOW_ALLOW_REQUEST_CWD=true (explicit): cwd stays optional, defaults to /tmp", async () => {
     const { base } = await startServer({ HAIFLOW_ALLOW_REQUEST_CWD: "true" });
     const { status, data } = await api(base, "/session/start", { session: "t7" });
-    expect(status).toBe(400);
-    expect(data.error).toBe("cwd is required");
+    expect(status).not.toBe(400);
+    if (status === 200) {
+      expect(data.cwdDefaulted).toBe(true);
+      expect(data.cwd).toBe("/tmp");
+    }
   });
 });

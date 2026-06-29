@@ -259,10 +259,10 @@ export class Haiflow implements INodeType {
 				displayName: 'Working Directory',
 				name: 'cwd',
 				type: 'string',
-				required: true,
+				required: false,
 				default: '',
 				placeholder: '/path/to/project',
-				description: 'Absolute path the session should run in',
+				description: 'Absolute path the session should run in. Optional: when left empty, the haiflow server falls back to HAIFLOW_CWD if one is pinned, otherwise /tmp.',
 				displayOptions: {
 					show: {
 						operation: ['startSession'],
