@@ -1,0 +1,139 @@
+---
+title: Security
+description: "The threat model, trust boundaries, defense-in-depth layers, and a hardening checklist."
+icon: lock
+---
+
+haiflow runs Claude Code inside a tmux session that has your shell, your `git`, and your `gh`, then exposes an HTTP API to drive it. That is the whole point, and it is also the whole risk: anyone who can get a prompt executed can run code as the operator. This page is the summary of the repository `SECURITY.md`. Read it before you put haiflow anywhere a network can reach.
+
+<Warning>
+The authentication boundaries are the real security perimeter: the API key, the hook localhost restriction, the webhook signatures, and the bridge allowlists. The guardrail skill and redaction are mitigations, not a sandbox. Run haiflow as a dedicated, low-privilege user, scoped to a single project directory (`HAIFLOW_CWD`), and do not expose it to untrusted networks without the controls below.
+</Warning>
+
+## Threat model
+
+A prompt that reaches a session executes with the operator's privileges, inside the working directory, subject to the defense-in-depth layers further down. So the question is never "can the model be tricked," it is "who is allowed to submit a prompt in the first place." Everything that gates prompt submission is part of the perimeter. Everything that runs after submission is best-effort containment.
+
+Two consequences follow:
+
+- Protect the credentials and signatures that let work in. A leaked `HAIFLOW_API_KEY`, an exposed `/hooks/*` route, an unsigned ingest, or an empty bridge allowlist each hands an attacker the operator's shell.
+- Limit the blast radius. Give the process its own user account and lock it to one project directory, so a successful prompt cannot reach the rest of the machine even if a mitigation is bypassed.
+
+## Trust boundaries
+
+Each surface that accepts input has its own control. Know which is which.
+
+| Surface | Control |
+| --- | --- |
+| HTTP API (`/trigger`, `/session/*`, `/map`, `/publish`, ...) | Bearer `HAIFLOW_API_KEY`, compared in constant time. This is the root credential: anyone holding it can run code in your sessions. |
+| Claude Code hooks (`/hooks/*`) | Restricted to localhost. Requests carrying reverse-proxy headers (`X-Forwarded-For`, `CF-Connecting-IP`) are rejected, so a tunnel or proxy cannot reach them. |
+| Inbound webhooks (`/ingest/:source`) | Not bearer-authenticated by design. Authenticity is a per-source HMAC signature over the raw body. |
+| Take-the-wheel terminal (`GET /terminal?mode=control`) | API key plus the `HAIFLOW_ALLOW_TAKEOVER` kill-switch. The read-only view is always available. |
+| GitHub bridge (`haiflow github`) | `X-Hub-Signature-256` HMAC, plus `GITHUB_ALLOWED_REPOS` and `GITHUB_ALLOWED_SENDERS` allowlists. |
+
+<AccordionGroup>
+  <Accordion title="HTTP API: the root credential" icon="key">
+    Every authenticated endpoint requires the bearer key, and the comparison is constant time to avoid timing leaks. Treat this key the way you treat an SSH private key: it is the operator's shell behind one header.
+
+    ```bash
+    curl http://localhost:3333/trigger \
+      -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"prompt":"run the test suite and summarize failures"}'
+    ```
+  </Accordion>
+  <Accordion title="Hooks: localhost only" icon="house-lock">
+    The `/hooks/*` routes are how Claude Code calls back into haiflow. They are bound to localhost and actively reject requests that arrive with reverse-proxy headers such as `X-Forwarded-For` or `CF-Connecting-IP`. A tunnel or front proxy therefore cannot smuggle a request to them. Never proxy `/hooks/*`.
+  </Accordion>
+  <Accordion title="Inbound webhooks: signature, not bearer" icon="signature">
+    `POST /ingest/:source` is the one endpoint that is not bearer-authenticated, so a SaaS can drive a task without holding your key. Authenticity is a per-source HMAC over the raw body (`github`, `stripe`, or generic `hmac-sha256`), with a one-use replay nonce bound to the signed material. It fails closed with `503` when Redis is unavailable, unless you set `HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS=true`. Each source is rate limited by `HAIFLOW_INGEST_RATE_PER_MIN` (default `120`/min, then `429`), and every payload field is wrapped in a `BEGIN/END WEBHOOK DATA` frame before it reaches the model. See [Inbound webhooks](/guides/inbound-webhooks).
+  </Accordion>
+  <Accordion title="Take-the-wheel terminal: gated and kill-switched" icon="terminal">
+    `GET /terminal?mode=control` is a writable PTY. It bypasses the structural prompt checks and the guardrail skill, so it is gated by the API key and the `HAIFLOW_ALLOW_TAKEOVER` kill-switch. The read-only view is always available.
+
+    Known limitation: the key is passed as a URL query parameter, which is capturable by reverse-proxy and browser logs. Only expose `/terminal` over localhost or a trusted tunnel, or set `HAIFLOW_ALLOW_TAKEOVER=false`. See [Dashboard](/guides/dashboard).
+  </Accordion>
+  <Accordion title="GitHub bridge: signature plus allowlists" icon="github">
+    `haiflow github` verifies the `X-Hub-Signature-256` HMAC and fails closed on `GITHUB_ALLOWED_REPOS` and `GITHUB_ALLOWED_SENDERS`. Both must match for the bridge to act, so an unlisted repo or sender is dropped.
+
+    Known limitation: the standalone bridge has no replay nonce of its own and relies on queue-level dedup. For persistent replay protection, use the `/ingest github` recipe instead. See [GitHub bridge](/guides/github-bridge).
+  </Accordion>
+</AccordionGroup>
+
+## Defense in depth
+
+These layers reduce the damage a submitted prompt can do. They are mitigations, not the perimeter, so do not rely on them to gate access.
+
+| Layer | Setting | What it does | Limit |
+| --- | --- | --- | --- |
+| Guardrail skill | `HAIFLOW_GUARDRAILS=true` (default) | Injects `haiflow-guardrails` into each session, telling Claude to refuse paths outside the cwd, refuse to read secrets, and refuse network exfiltration. | LLM-instructed and best-effort, not an enforced sandbox. |
+| Structural prompt blocks | always on | Rejects any prompt containing sandbox-escape (`--dangerously-skip-permissions`) or tmux-manipulation patterns before it runs. | Pattern based, covers the known escape shapes. |
+| cwd locking | `HAIFLOW_CWD`, `HAIFLOW_ALLOW_REQUEST_CWD=false` | Forces every session to one directory and rejects a request-supplied `cwd`. | Confines the filesystem starting point, not the process. |
+| Secret redaction | `HAIFLOW_REDACT=true` (default) | Strips well-known credential shapes from all outbound text. | Not a firewall: will not catch encoded or reshaped secrets. |
+| Transcript path allowlist | always on | The Stop hook only reads transcripts under `~/.claude` or `/tmp/claude`, resolving symlinks with `realpath` and requiring a regular file. | Scoped to transcript reads. |
+
+<Note>
+Guardrails and redaction are on by default. Leave them on. They make the common mistakes harder, but they assume the perimeter is already holding. See [Configuration](/configuration) for the full list of variables.
+</Note>
+
+## What the guardrail skill refuses
+
+The injected skill is deliberately narrow. It refuses only five categories of action, lets everything else proceed normally, and cannot be reconfigured by a prompt.
+
+1. Reading, listing, copying, or stat-ing files outside the current working directory, including `~/`-relative paths and `..` traversal that escapes the cwd.
+2. Reading files that match secret patterns even inside the cwd: `.env`, `.envrc`, `*.pem`, `*.key`, `id_rsa*`, and anything under `~/.ssh`, `~/.aws`, `~/.config`, or `~/.gnupg`.
+3. Running network-egress tools: `curl`, `wget`, `scp`, `rsync`, `nc`, `ssh`. Local-inspection tools like `git status` are fine.
+4. Using `WebFetch` or `WebSearch` to reach external services.
+5. Executing hidden one-liners: `bash -c`, `sh -c`, `eval`, `python -c`, `perl -e`. If a task needs a script, it must be written to a file inside the cwd first.
+
+<Info>
+Because the skill is LLM-instructed, treat it as a seatbelt rather than a wall. The structural prompt blocks and the cwd lock run regardless of how the model behaves.
+</Info>
+
+## Hardening checklist
+
+Work through these before exposing haiflow beyond your own loopback.
+
+1. Set a strong, unique `HAIFLOW_API_KEY` and keep it out of logs and URLs.
+2. Keep hooks on localhost. Never expose `/hooks/*` through a proxy.
+3. Lock sessions to one project: `HAIFLOW_CWD=/path` and `HAIFLOW_ALLOW_REQUEST_CWD=false`.
+4. Leave `HAIFLOW_GUARDRAILS` and `HAIFLOW_REDACT` on.
+5. If you do not need the writable browser terminal, set `HAIFLOW_ALLOW_TAKEOVER=false`. If you do, keep `/terminal` localhost-only.
+6. Run the signed-webhook gateway with Redis available so replay protection is active. It fails closed otherwise.
+7. For chat and webhook bridges, configure the allowlists. They fail closed, so an empty allowlist serves no one.
+
+<Check>
+Pair this list with [Deployment](/deployment), which fails closed at boot in production mode on an insecure exposure or a weak key.
+</Check>
+
+## Reporting a vulnerability
+
+Report security issues privately through the repository's GitHub Security Advisories (the **Security** tab, then **Report a vulnerability**), not as public issues. Include reproduction steps and the affected version.
+
+<CodeGroup>
+```bash CLI
+haiflow version
+```
+
+```bash HTTP
+curl http://localhost:3333/version \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+</CodeGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Deployment" icon="server" href="/deployment">
+    Fail-closed boot checks and how to front the origin safely.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Every environment variable, including the guardrail and redaction knobs.
+  </Card>
+  <Card title="Inbound webhooks" icon="shield-halved" href="/guides/inbound-webhooks">
+    Signature verification, replay nonces, and rate limits in detail.
+  </Card>
+  <Card title="GitHub bridge" icon="github" href="/guides/github-bridge">
+    Allowlists, signature checks, and the persistent-replay recipe.
+  </Card>
+</CardGroup>

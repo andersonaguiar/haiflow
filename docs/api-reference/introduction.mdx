@@ -1,0 +1,96 @@
+---
+title: API overview
+description: "Base URL, authentication, conventions, and error codes for the haiflow REST API."
+icon: "code"
+---
+
+The haiflow REST API drives Claude Code over HTTP. Every endpoint in the reference is shown with an interactive playground (set your base URL and bearer token in the panel, then send a real request).
+
+## Base URL
+
+By default haiflow listens on:
+
+```
+http://localhost:3333
+```
+
+Behind a tunnel or reverse proxy, use your public hostname (see [Deployment](/deployment)). The port is set by `PORT`.
+
+## Authentication
+
+All endpoints require an `Authorization: Bearer <HAIFLOW_API_KEY>` header, with these exceptions:
+
+- `GET /health` and `GET /version` are public.
+- `POST /hooks/*` are restricted to localhost (used by Claude Code's hooks, not by you).
+- `POST /ingest/:source` is authenticated by a per-source HMAC **signature** instead of the bearer key, so you never hand a third party your key.
+
+```bash
+curl -H "Authorization: Bearer $HAIFLOW_API_KEY" http://localhost:3333/sessions
+```
+
+<Warning>
+`HAIFLOW_API_KEY` is the root credential. Anyone holding it can run code in your sessions with full file and git access. Keep it out of logs and URLs, and compare-safe at the edge: haiflow checks it in constant time. See the [threat model](/security).
+</Warning>
+
+## The session parameter
+
+Almost every endpoint is scoped to a **session**. When you trigger a task on `worker`, you must read its response from `worker` too.
+
+<Warning>
+Most read endpoints default `session` to `default`. Always pass the same `session` you triggered on, on `/responses/:id`, `/responses/:id/stream`, `/status`, and friends. Omitting it silently targets the `default` session.
+</Warning>
+
+## Conventions
+
+- **Content type.** Request bodies are JSON (`Content-Type: application/json`). Responses are JSON, except `GET /health` (plain text) and `GET /responses/:id/stream` (`text/event-stream`).
+- **Task ids.** You can pass your own `id` on `/trigger`, or let haiflow generate one. Use a deterministic id (for example `daily-20260629`) when you want idempotent reads.
+- **Timestamps.** ISO 8601 UTC (for example `2026-06-28T10:00:00.000Z`).
+
+## Status codes
+
+| Code | Meaning |
+| --- | --- |
+| `200` | Success. |
+| `202` | Accepted but not ready: a task is still `pending` or `queued`. |
+| `400` | Invalid request (bad body, disabled feature, or a value off an allowlist). |
+| `401` | Missing or invalid bearer token. |
+| `404` | Unknown session, task, topic, pool, or queued item. |
+| `409` | Conflict: a session that could not link its hooks, or a replayed webhook. |
+| `429` | Rate limited (the `/ingest` gateway). A `Retry-After` header is included. |
+| `503` | Unavailable: the target session is offline, or the ingest gateway is failing closed without Redis. |
+
+Errors return `{ "error": "..." }`, sometimes with a `session` field.
+
+## Client options
+
+You do not have to call the raw API yourself:
+
+<CardGroup cols={2}>
+  <Card title="CLI" icon="terminal" href="/guides/cli">
+    `haiflow start`, `trigger`, `responses`, `status`, `doctor`, and more.
+  </Card>
+  <Card title="MCP server" icon="plug" href="/integrations/mcp">
+    Eight MCP tools for any MCP-capable agent.
+  </Card>
+  <Card title="n8n nodes" icon="diagram-project" href="/integrations/n8n">
+    Trigger, Trigger and Wait, sessions, and a pipeline trigger node.
+  </Card>
+  <Card title="Dashboard" icon="gauge" href="/guides/dashboard">
+    A built-in web UI at `/dashboard`.
+  </Card>
+</CardGroup>
+
+## Endpoint groups
+
+Use the sidebar to browse every endpoint. They are grouped by:
+
+- **Sessions**: start, stop, list, inspect, interrupt.
+- **Triggers**: send prompts, with queueing, priority, dedup, scheduling, and fire-and-forget.
+- **Responses**: fetch, stream (SSE), timelines, and clearing.
+- **Queue**: inspect and manage pending prompts.
+- **Tasks**: the durable ledger of what each task did.
+- **Usage & Savings**: token consumption and API cost avoided.
+- **Pools & Map-Reduce**: fan-out and reduce across member sessions.
+- **Pipeline**: event-driven agent chains.
+- **Webhooks**: the signed inbound gateway.
+- **System**: health, version, diagnostics.

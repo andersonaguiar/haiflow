@@ -89,10 +89,10 @@ export async function trigger(session: string, prompt: string, source?: string) 
   return res.json();
 }
 
-export async function startSession(session: string, cwd: string) {
+export async function startSession(session: string, cwd?: string) {
   const res = await apiFetch("/session/start", {
     method: "POST",
-    body: JSON.stringify({ session, cwd }),
+    body: JSON.stringify(cwd ? { session, cwd } : { session }),
   });
   return { status: res.status, data: await res.json() };
 }

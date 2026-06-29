@@ -1,0 +1,96 @@
+---
+title: Context management
+description: "Why context filling is not a problem with haiflow, and when to keep sessions warm versus one-shot."
+icon: "brain"
+---
+
+A common worry with long-running Claude Code workflows is that the context window slowly fills up and degrades the agent. With haiflow this is not a problem you have to manage. Each session is tied to the current task, so context never has to accumulate forever, and a fresh session is always one trigger away.
+
+## Why context filling is not a problem
+
+Every haiflow session is scoped to the task it is running. Once that task completes, the session can close cleanly with no leftover context. You do not inherit stale history from unrelated work, and you do not have to babysit the window size.
+
+If context does fill up over a series of tasks, you never get stuck: the next task simply starts a fresh session. Filling the window is a non-event because a clean slate is always available on demand.
+
+<Note>
+Closing the session when the task is done is the clean default. Keeping it alive is an optional optimisation, not a requirement.
+</Note>
+
+## Warm sessions build awareness
+
+Keeping a session alive is optional and useful. When a session is still healthy after a task, haiflow keeps it alive so context builds up across tasks. That accumulated context gives Claude more awareness of prior work in the same session: the files it already read, the decisions it made, and the patterns it established.
+
+This is exactly what you want for a series of related tasks. The second and third triggers land on a session that already understands the project, so you spend less of each prompt re-explaining background that Claude already has.
+
+See [Sessions](/concepts/sessions) for how sessions are created, named, and torn down.
+
+## Warm versus one-shot
+
+Choose based on whether continuity between tasks helps you or gets in your way.
+
+| Mode | Use it when | Behaviour |
+| --- | --- | --- |
+| Warm (long-lived) | A series of related tasks where continuity helps | Claude remembers earlier work in the same session, context builds up across tasks |
+| One-shot (ephemeral) | Isolated jobs that want a clean context every time | Fresh context per job, automatic teardown when the job finishes |
+
+### Keep a warm session for related work
+
+For a sequence of related tasks, keep one long-lived session and send each task to it. Claude carries forward what it learned from the earlier tasks, so continuity works in your favour.
+
+```bash
+# First task warms the session
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "map the auth module and list its entry points", "session": "worker", "id": "auth-1"}'
+
+# A later, related task reuses the same warm session
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "now add tests for the entry points you found", "session": "worker", "id": "auth-2"}'
+```
+
+### Use a one-shot trigger for isolated jobs
+
+For isolated jobs where you want a clean context every time and automatic teardown, use a one-shot ephemeral trigger. See [Fire-and-forget](/guides/fire-and-forget) for the full pattern. Each job gets a fresh context and tears itself down when it finishes, so nothing leaks between unrelated jobs.
+
+<Tip>
+Reach for one-shot when the jobs have nothing to do with each other, for example processing independent inbound events. Reach for a warm session when each task builds on the last.
+</Tip>
+
+## Deliberately resetting context
+
+If you want to reset context on purpose, for instance when a long warm session has drifted or you want a clean baseline, stop and restart the session. The restarted session starts fresh, exactly like the first task that warmed it.
+
+```bash
+# Stop the session to clear its accumulated context
+curl -X POST http://localhost:3333/session/stop \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "worker"}'
+
+# Start it again with a clean slate
+curl -X POST http://localhost:3333/session/start \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "worker", "cwd": "/path/to/your/project"}'
+```
+
+<Warning>
+If a warm session stops returning responses or feels stuck rather than just full, that is a health issue, not a context issue. See [Troubleshooting](/guides/troubleshooting) before assuming the window is to blame.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Sessions" icon="layer-group" href="/concepts/sessions">
+    How sessions are created, named, kept warm, and torn down.
+  </Card>
+  <Card title="Fire-and-forget" icon="bolt" href="/guides/fire-and-forget">
+    One-shot ephemeral triggers with a clean context and automatic teardown.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Diagnose a session that is stuck rather than simply full.
+  </Card>
+</CardGroup>

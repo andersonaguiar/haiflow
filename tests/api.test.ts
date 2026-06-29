@@ -1,5 +1,9 @@
 import { test, expect, describe, beforeAll, afterAll, beforeEach } from "bun:test";
 import { mkdirSync, writeFileSync, existsSync, rmSync, unlinkSync } from "fs";
+import { resolve } from "path";
+
+// Absolute entry so the server can be spawned from a neutral cwd.
+const SERVER_ENTRY = resolve(import.meta.dir, "../src/index.ts");
 
 const TEST_PORT = 9876;
 const TEST_DIR = "/tmp/haiflow-test";
@@ -40,8 +44,14 @@ function writeResponse(session: string, taskId: string, data: object) {
 beforeAll(async () => {
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
 
-  server = Bun.spawn(["bun", "run", "src/index.ts"], {
-    env: { ...process.env, PORT: String(TEST_PORT), HAIFLOW_DATA_DIR: TEST_DIR, HAIFLOW_API_KEY: TEST_API_KEY },
+  server = Bun.spawn(["bun", "run", SERVER_ENTRY], {
+    // Neutral cwd so the cwd-optional /session/start fallback resolves to /tmp
+    // (a fast-failing dir in tests) instead of the repo root.
+    cwd: "/tmp",
+    // Run from a neutral dir and bound the readiness wait so a real /session/start
+    // can't hang the suite (200 if it links fast, otherwise 409); guardrails off.
+    // The omitted-cwd fallback is the fixed DEFAULT_CWD = "/tmp" regardless of this.
+    env: { ...process.env, PORT: String(TEST_PORT), HAIFLOW_DATA_DIR: TEST_DIR, HAIFLOW_API_KEY: TEST_API_KEY, HAIFLOW_START_READY_TIMEOUT_MS: "2000", HAIFLOW_GUARDRAILS: "false" },
     stdout: "ignore",
     stderr: "ignore",
   });
@@ -109,11 +119,13 @@ describe("GET /status", () => {
 // --- Session start validation ---
 
 describe("POST /session/start", () => {
-  test("requires cwd", async () => {
+  test("cwd is optional (defaults to /tmp)", async () => {
     const { status, data } = await api("/session/start", "POST", { session: "test" });
-    expect(status).toBe(400);
-    expect(data.error).toBe("cwd is required");
-  });
+    // cwd is optional: a missing cwd no longer 400s. It starts (200) or fails on
+    // tmux/claude (409), but never rejects for a missing cwd.
+    expect(status).not.toBe(400);
+    if (status === 200) expect(data.cwdDefaulted).toBe(true);
+  }, 15000);
 
   test("sanitizes session name", async () => {
     const { status, data } = await api("/session/start", "POST", {

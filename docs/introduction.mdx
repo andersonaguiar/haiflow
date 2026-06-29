@@ -1,0 +1,93 @@
+---
+title: Introduction
+description: "Run Claude Code as a headless AI agent over HTTP, on your existing subscription, with no per-token API costs."
+icon: "hexagon"
+---
+
+**haiflow** (**h**ooks · **ai** · **flow**) is an HTTP orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It wraps Claude Code in `tmux` sessions and exposes a REST API so you can trigger prompts, queue work, stream responses, fan work across worker pools, and chain agents together, all from any HTTP client.
+
+Anything you can do in Claude Code (code generation, refactoring, bug triage, daily reports) you can automate over HTTP with n8n, cron, webhooks, or any tool that can make a request.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install, start a session, and get your first response in about five minutes.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/introduction">
+    Every endpoint, parameter, and response, with an interactive playground.
+  </Card>
+  <Card title="MCP server" icon="plug" href="/integrations/mcp">
+    Drive haiflow as MCP tools from Claude Desktop, Cursor, Cline, or another agent.
+  </Card>
+  <Card title="Pipelines" icon="diagram-project" href="/guides/pipelines">
+    Chain agents with event-driven pub/sub: design to develop to review to QA.
+  </Card>
+</CardGroup>
+
+## Why haiflow
+
+<Note>
+**Why not just the Claude API?** Claude Code already includes tool use, file access, git integration, and your custom skills. haiflow lets you automate all of that over HTTP without paying per-token API costs, because it runs the local `claude` CLI and reuses your existing Claude Code login. Your `HAIFLOW_API_KEY` is a secret you choose to protect the server, not a paid credential.
+</Note>
+
+- **No per-token costs.** Tasks run on your flat Claude Code subscription. haiflow even reports the API cost you avoided (see [Usage & savings](/guides/usage-and-savings)).
+- **Full agent capability.** File access, shell, `git`, `gh`, and your skills, not just text completion.
+- **Drive it from anywhere.** A plain REST API plus a built-in [dashboard](/guides/dashboard), an [MCP server](/integrations/mcp), [n8n nodes](/integrations/n8n), a [CLI](/guides/cli), and a [GitHub bridge](/guides/github-bridge).
+- **Built for automation.** A FIFO queue with priority, dedup, scheduling, fire-and-forget jobs, worker pools, map-reduce, and event pipelines.
+
+## How it works
+
+```
+POST /trigger ───┐
+                 │        ┌────────────────┐
+             ┌───▼───┐    │  tmux session  │
+             │ Queue ├───>│   (claude)     │
+             │ (FIFO)│    └───────┬────────┘
+             └───────┘            │
+                           hooks fire on
+                           session events
+                                  │
+                          ┌───────▼────────┐
+                          │    Responses   │
+                          └───────┬────────┘
+                                  │
+GET /responses/:id <──────────────┤
+                                  │
+GET /responses/:id/stream <───────┘  (SSE)
+```
+
+1. `POST /session/start` spawns Claude in a detached tmux session.
+2. `POST /trigger` sends a prompt (or queues it when busy) and assigns a task id.
+3. Claude Code hooks forward lifecycle events (start, prompt, stop, end) back to the haiflow server.
+4. On completion, the server extracts the assistant messages from the session transcript and saves them keyed by task id.
+5. `GET /responses/:id` returns the result, or you stream it live with `GET /responses/:id/stream`.
+
+Read the full breakdown in [Architecture](/concepts/architecture).
+
+## What you can build
+
+<CardGroup cols={2}>
+  <Card title="Worker pools & map-reduce" icon="layer-group" href="/guides/worker-pools">
+    Fan 40 files across a pool of review agents and reduce to one report, for no extra per-token cost.
+  </Card>
+  <Card title="Agent pipelines" icon="share-nodes" href="/guides/pipelines">
+    A design agent emits an event, a developer agent picks it up, a reviewer follows, all decoupled.
+  </Card>
+  <Card title="Signed inbound webhooks" icon="shield-halved" href="/guides/inbound-webhooks">
+    Let a GitHub or Stripe webhook drive a task directly, without handing out your API key.
+  </Card>
+  <Card title="Fire-and-forget jobs" icon="bolt" href="/guides/fire-and-forget">
+    One request brings a session up, runs a task, posts the result to your URL, and tears it down.
+  </Card>
+</CardGroup>
+
+## Platform support
+
+macOS and Linux only. Windows is not supported yet, because haiflow depends on `tmux` and POSIX shell scripts.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart" horizontal />
+  <Card title="Installation" icon="download" href="/installation" horizontal />
+  <Card title="Configuration" icon="gear" href="/configuration" horizontal />
+</CardGroup>

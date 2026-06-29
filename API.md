@@ -14,10 +14,10 @@ curl -X POST http://localhost:3333/session/start \
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `cwd` | string | **Yes** | Working directory for Claude |
+| `cwd` | string | No | Working directory for Claude. When omitted, haiflow uses `HAIFLOW_CWD` if pinned, otherwise it falls back to `/tmp` (the response then includes `"cwdDefaulted": true`) |
 | `session` | string | No | Session name (default: `"default"`) |
 
-Returns `{ "started": true, "session": "worker", "tmux": "worker", "cwd": "...", "ready": true }`. `ready` is `false` when the session linked but its TUI readiness could not be confirmed in time (still usable). When the server has a forced `HAIFLOW_CWD` that differs from the requested `cwd`, the response also includes `"cwdOverridden": true` and `cwd` reflects the forced value.
+Returns `{ "started": true, "session": "worker", "tmux": "worker", "cwd": "...", "ready": true }`. `ready` is `false` when the session linked but its TUI readiness could not be confirmed in time (still usable). When the server has a forced `HAIFLOW_CWD` that differs from the requested `cwd`, the response also includes `"cwdOverridden": true` and `cwd` reflects the forced value. When `cwd` is omitted and no `HAIFLOW_CWD` is pinned, the session starts in `/tmp` and the response includes `"cwdDefaulted": true`. With `HAIFLOW_ALLOW_REQUEST_CWD=false`, sending a `cwd` is rejected with `400`.
 
 If the session never links a Claude session id within `HAIFLOW_START_READY_TIMEOUT_MS` (default 15000) — almost always because the Claude hooks are not wired — the dead pane is torn down and the call returns `409` with `{ "error": "...hooks are likely not wired (run `haiflow setup`)", "session": "..." }` rather than reporting a healthy start that would silently drop every response. Run `haiflow setup` / `haiflow doctor` to wire and verify hooks.
 

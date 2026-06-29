@@ -1,0 +1,176 @@
+---
+title: Queueing & scheduling
+description: "The per-session FIFO queue, with priority, dedup, scheduling, and cancellation."
+icon: "list-ol"
+---
+
+Every session has its own FIFO queue. You never have to check whether Claude is free before sending work: `POST /trigger` always accepts the prompt, runs it immediately when the session is idle, or queues it when the session is busy. The queue drains itself, so as soon as Claude finishes a task the next queued prompt is sent automatically.
+
+This page covers how the queue behaves and the four levers you control on top of plain FIFO order: priority, dedup, scheduling, and cancellation.
+
+## How the queue works
+
+When you `POST /trigger`, one of two things happens:
+
+- **Idle session:** the prompt is sent straight to Claude and you get back `{ id, sent: true }`.
+- **Busy session:** the prompt is appended to that session's queue and you get back `{ id, queued: true, position }`, where `position` is its place in line.
+
+You do not poll to advance the queue. When the running task completes, haiflow picks the next eligible prompt and sends it. The same task `id` you passed (or one assigned for you) is what you later read back from `GET /responses/:id`.
+
+<Note>
+The queue is per session. Each session drains independently, so a busy `worker` session never blocks a prompt aimed at a different session.
+</Note>
+
+```bash
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "summarise the open PRs", "session": "worker", "id": "summary-1"}'
+```
+
+```json
+{ "id": "summary-1", "queued": true, "position": 2 }
+```
+
+## Priority
+
+By default prompts drain in the order they arrive. Set the `priority` field on `POST /trigger` to jump the line: it is a number that defaults to `0`, higher values drain first, and ties break in FIFO order.
+
+```bash
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "hotfix the failing build", "session": "worker", "id": "hotfix-1", "priority": 5}'
+```
+
+Already queued something and need to bump it? Re-prioritise a queued item in place with `POST /queue/:id`:
+
+```bash
+curl -X POST http://localhost:3333/queue/summary-1 \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"priority": 9}'
+```
+
+<Warning>
+`POST /queue/:id` returns `404` if the id is not currently queued. A task that has already started running can no longer be re-prioritised.
+</Warning>
+
+## Dedup
+
+Pass a `dedupKey` on `POST /trigger` to collapse duplicate work. If a prompt with the same key is already running or queued, the new enqueue is dropped and you get `{ id, deduped: true }` instead of a new queue slot.
+
+```bash
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "rebuild the docs site", "session": "worker", "id": "docs-build", "dedupKey": "docs-build"}'
+```
+
+```json
+{ "id": "docs-build", "deduped": true }
+```
+
+<Tip>
+Dedup is ideal for webhooks and retries that may fire the same event more than once. Use a stable `dedupKey` (for example the upstream event id) so a burst of identical triggers results in exactly one run.
+</Tip>
+
+## Scheduling
+
+You can defer a prompt instead of running it as soon as the session is free. Two fields on `POST /trigger` control this:
+
+| Field | Type | Behaviour |
+| --- | --- | --- |
+| `delaySeconds` | number | Run the task no sooner than this many seconds from now. |
+| `notBefore` | ISO timestamp | Run the task no sooner than this absolute time. |
+
+If you pass both, `notBefore` takes precedence. The drain only picks a scheduled task up once it is due, and it does so even on an idle session, so a delayed prompt waits for its time rather than running immediately.
+
+```bash
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "post the daily standup summary", "session": "worker", "id": "standup", "delaySeconds": 3600}'
+```
+
+## Inspect the queue
+
+Read or clear queued prompts with the queue endpoints.
+
+<ParamField path="GET /queue" type="query: session">
+  View the queued prompts for a session.
+</ParamField>
+
+<ParamField path="DELETE /queue" type="query: session">
+  Clear the whole queue for a session.
+</ParamField>
+
+<ParamField path="DELETE /queue/:id" type="query: session">
+  Remove a single queued item by id.
+</ParamField>
+
+```bash
+# View what is queued for the worker session
+curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  "http://localhost:3333/queue?session=worker" | jq .
+
+# Drop one queued item
+curl -X DELETE -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  "http://localhost:3333/queue/summary-1?session=worker"
+
+# Clear everything still waiting
+curl -X DELETE -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  "http://localhost:3333/queue?session=worker"
+```
+
+## Cancel a task
+
+`POST /tasks/:id/cancel` cancels a single task by id, whether it is the one running now or still waiting in the queue. Pass the `session` it belongs to.
+
+```bash
+curl -X POST -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  "http://localhost:3333/tasks/hotfix-1/cancel?session=worker"
+```
+
+What happens depends on where the task is:
+
+<AccordionGroup>
+  <Accordion title="The id is the running task">
+    haiflow sends `Escape` to interrupt Claude, records a cancelled task and response, returns the session to idle, and drains the next queued prompt.
+
+    ```json
+    { "cancelled": true, "where": "running" }
+    ```
+  </Accordion>
+  <Accordion title="The id is a queued item">
+    haiflow removes just that item from the queue and leaves everything else in place.
+
+    ```json
+    { "cancelled": true, "where": "queue" }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+If the id is neither running nor queued, the endpoint returns `404`.
+
+<Note>
+Cancelling a single task does not kill the warm session and does not clear the rest of the queue. To stop a running task and leave the line behind it untouched, cancel the task. To clear everything still waiting, use `DELETE /queue`.
+</Note>
+
+## Triggering an offline session
+
+If you trigger a session that is not running, `POST /trigger` returns `503`. The exception is an `ephemeral` trigger, which auto-starts the session, runs the task, and tears it down. See [Fire-and-forget](/guides/fire-and-forget) for that pattern.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Task ledger" icon="clipboard-list" href="/concepts/task-ledger">
+    How tasks and their responses are recorded across their lifecycle.
+  </Card>
+  <Card title="Fire-and-forget" icon="bolt" href="/guides/fire-and-forget">
+    Auto-start a session, run one task, post the result, and tear it down.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    Every queue, schedule, and cancel parameter, with an interactive playground.
+  </Card>
+</CardGroup>

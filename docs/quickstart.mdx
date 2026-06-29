@@ -1,0 +1,144 @@
+---
+title: Quickstart
+description: "Install haiflow, start a Claude Code session, and capture your first response."
+icon: "rocket"
+---
+
+This guide takes you from nothing to a working setup that sends a prompt to Claude Code over HTTP and reads the response back.
+
+<Note>
+**Prerequisites:** [Bun](https://bun.sh) v1.2.3+, [tmux](https://github.com/tmux/tmux), the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), and [jq](https://jqlang.github.io/jq/). [Redis](https://redis.io/) is optional but recommended (it enables event persistence and signed-webhook replay protection). See [Installation](/installation) for details.
+</Note>
+
+## Install
+
+<Tabs>
+  <Tab title="One-liner (recommended)">
+    Installs Bun if missing, checks for `tmux` / `jq` / `claude` / `redis`, installs the `haiflow` CLI globally, and wires up Claude Code hooks.
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/andersonaguiar/haiflow/main/install.sh | bash
+    ```
+
+    <Tip>Want to read the script first? Pipe it to `less` instead of `bash`. Skip hook setup with `HAIFLOW_SKIP_SETUP=1`, or force the npm registry with `HAIFLOW_INSTALL_METHOD=npm`.</Tip>
+  </Tab>
+  <Tab title="From source">
+    ```bash
+    git clone https://github.com/andersonaguiar/haiflow.git
+    cd haiflow
+    bun install        # also installs Claude Code hooks automatically
+    cp .env.example .env
+    # Edit .env and set HAIFLOW_API_KEY to any secret string you choose
+    bun run dev        # starts the server with hot reload
+    ```
+  </Tab>
+</Tabs>
+
+## Run it
+
+<Steps>
+  <Step title="Set your API key and start the server">
+    `HAIFLOW_API_KEY` is a secret you define to protect the server. It is not a paid Anthropic key. Pick any string.
+
+    ```bash
+    export HAIFLOW_API_KEY=$(openssl rand -hex 32)
+    haiflow serve
+    ```
+
+    The server listens on `http://localhost:3333` by default.
+  </Step>
+
+  <Step title="Wire hooks and start a session">
+    In another shell, `haiflow init` is the fastest path to a working setup. It installs the hooks, starts a session, fires a smoke-test prompt, and tells you immediately if the hooks are not wired (the number-one silent failure).
+
+    ```bash
+    export HAIFLOW_API_KEY=...   # same value as the server
+    haiflow init /path/to/your/project
+    ```
+
+    Prefer to do it by hand? Use `haiflow start worker --cwd /path/to/your/project`.
+  </Step>
+
+  <Step title="Send a prompt">
+    ```bash
+    curl -X POST http://localhost:3333/trigger \
+      -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"prompt": "explain this codebase", "session": "worker", "id": "my-task"}'
+    ```
+
+    You get `{"id": "my-task", "sent": true}` when idle, or `{"id": "my-task", "queued": true, "position": 1}` when Claude is busy.
+  </Step>
+
+  <Step title="Read the response">
+    Poll for it:
+
+    ```bash
+    curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      "http://localhost:3333/responses/my-task?session=worker" | jq .
+    ```
+
+    Or stream it live over Server-Sent Events (no polling):
+
+    ```bash
+    curl -N -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      "http://localhost:3333/responses/my-task/stream?session=worker"
+    ```
+
+    <Warning>Pass the same `session` you triggered on. Omitting it silently reads the `default` session's responses.</Warning>
+  </Step>
+
+  <Step title="Watch and stop">
+    Watch Claude work (read-only):
+
+    ```bash
+    tmux attach -t worker -r
+    ```
+
+    Stop the session when you are done:
+
+    ```bash
+    curl -X POST http://localhost:3333/session/stop \
+      -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"session": "worker"}'
+    ```
+  </Step>
+</Steps>
+
+## Same thing, with the CLI
+
+```bash
+haiflow start worker --cwd /path/to/your/project
+haiflow trigger "explain this codebase" --session worker --id my-task
+haiflow responses my-task --session worker
+haiflow stop worker
+```
+
+## Verify health anytime
+
+If a session sits busy forever or never returns a response, the hooks are almost certainly not wired. Check it:
+
+```bash
+haiflow doctor worker
+# or: curl -s -H "Authorization: Bearer $HAIFLOW_API_KEY" "http://localhost:3333/doctor?session=worker" | jq .
+```
+
+A healthy session reports `tmuxRunning: true` and `hooksLinked: true`. See [Troubleshooting](/guides/troubleshooting) if not.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Open the dashboard" icon="gauge" href="/guides/dashboard">
+    Monitor and control every session at `http://localhost:3333/dashboard`.
+  </Card>
+  <Card title="Understand the architecture" icon="sitemap" href="/concepts/architecture">
+    Sessions, the hook lifecycle, the queue, and how responses are captured.
+  </Card>
+  <Card title="Configure everything" icon="gear" href="/configuration">
+    Every environment variable, grouped by purpose.
+  </Card>
+  <Card title="Expose it safely" icon="globe" href="/deployment">
+    Put haiflow behind Cloudflare Zero Trust for remote access.
+  </Card>
+</CardGroup>

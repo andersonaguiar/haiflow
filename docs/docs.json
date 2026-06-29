@@ -1,0 +1,123 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "haiflow",
+  "description": "HTTP orchestrator for Claude Code: run Claude in tmux, trigger prompts via API, queue work, capture responses.",
+  "colors": {
+    "primary": "#cc785c",
+    "light": "#e0a08a",
+    "dark": "#b35c3f"
+  },
+  "favicon": "/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://github.com/andersonaguiar/haiflow"
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "search": {
+    "prompt": "Search the haiflow docs..."
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/sessions",
+              "concepts/queueing",
+              "concepts/task-ledger",
+              "concepts/context-management"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/cli",
+              "guides/dashboard",
+              "guides/pipelines",
+              "guides/worker-pools",
+              "guides/fire-and-forget",
+              "guides/inbound-webhooks",
+              "guides/github-bridge",
+              "guides/usage-and-savings",
+              "guides/troubleshooting"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/mcp",
+              "integrations/n8n"
+            ]
+          },
+          {
+            "group": "Deploy & Secure",
+            "pages": [
+              "deployment",
+              "security"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api-reference/introduction"
+            ]
+          }
+        ],
+        "openapi": "/openapi.json"
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/andersonaguiar/haiflow",
+          "icon": "github"
+        },
+        {
+          "anchor": "Claude Code Docs",
+          "href": "https://docs.anthropic.com/en/docs/claude-code",
+          "icon": "book-open"
+        }
+      ]
+    }
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Security",
+        "href": "https://github.com/andersonaguiar/haiflow/blob/main/SECURITY.md"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "GitHub",
+      "href": "https://github.com/andersonaguiar/haiflow"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/andersonaguiar/haiflow"
+    }
+  }
+}

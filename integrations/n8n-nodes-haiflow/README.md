@@ -78,7 +78,7 @@ Returns `200` with the full response (`{ id, completed_at, prompt, messages }`),
 Starts a session (`POST /session/start`). Fields:
 
 - **Session** (required, default `default`).
-- **Working Directory** (required): the absolute path the session runs in.
+- **Working Directory** (optional): the absolute path the session runs in. When left empty, the haiflow server falls back to `HAIFLOW_CWD` if pinned, otherwise `/tmp`.
 
 ### Stop Session
 

@@ -196,13 +196,9 @@ async function startSession() {
   const session = args[1] || "default";
   const cwd = flag("cwd");
 
-  if (!cwd) {
-    console.error("--cwd is required");
-    console.error("Usage: haiflow start <session> --cwd /path/to/project");
-    process.exit(1);
-  }
-
-  const data = await api("/session/start", "POST", { session, cwd });
+  // cwd is optional: when omitted, the server falls back to HAIFLOW_CWD if one
+  // is pinned, otherwise /tmp.
+  const data = await api("/session/start", "POST", cwd ? { session, cwd } : { session });
   console.log(`Started session '${data.session}' (tmux: ${data.tmux})`);
   console.log(`Working directory: ${data.cwd}`);
   console.log(`Watch: tmux attach -t ${data.tmux} -r`);
@@ -271,7 +267,9 @@ async function prune() {
 }
 
 async function responses() {
-  const id = args[1];
+  // Skip a flag-looking first arg so `responses --session worker` lists rather
+  // than being treated as `responses <id="--session">`.
+  const id = args[1] && !args[1].startsWith("--") ? args[1] : undefined;
   const session = flag("session") || "default";
 
   if (id) {
@@ -300,7 +298,7 @@ Commands:
   setup                          Install Claude Code hooks
   init [dir] [--session name]    One-shot onboarding: hooks + session + smoke test
   doctor [session]               Report hook/session health (catches unwired hooks)
-  start <session> --cwd <path>   Start a Claude session
+  start <session> [--cwd <path>] Start a Claude session (cwd defaults to HAIFLOW_CWD or /tmp)
   stop [session]                 Stop a Claude session
   trigger <prompt>               Send a prompt to Claude
   status [session]               Check session status
@@ -310,7 +308,7 @@ Commands:
   version                        Print the haiflow version
 
 Options:
-  --cwd <path>       Working directory (required for start)
+  --cwd <path>       Working directory for start (optional; defaults to HAIFLOW_CWD or /tmp)
   --session <name>   Session name (default: "default")
   --id <id>          Task ID for trigger
   --source <name>    Source label for trigger

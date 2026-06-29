@@ -1,0 +1,226 @@
+---
+title: Pipelines
+description: "Chain agents with event-driven pub/sub topics, so each agent picks up the previous one's output."
+icon: diagram-project
+---
+
+Pipelines let you chain Claude Code agents without wiring them together by hand. When an agent finishes a task, haiflow publishes its output to one or more topics. Any agent subscribed to those topics receives that output as its next prompt. There are no hardcoded dependencies between agents: you describe the topics, who emits to them, and who listens, and haiflow routes the work.
+
+This decoupling is what makes pipelines flexible. Add a new subscriber to a topic and it starts receiving events immediately. Remove an emitter and the rest of the chain keeps working.
+
+## How it works
+
+Each link in a pipeline is driven by the session stop hook. When an agent completes, haiflow inspects the pipeline config and fans the output out to the right subscribers.
+
+<Steps>
+  <Step title="An agent finishes a task">
+    The agent completes its work and `POST /hooks/stop` fires for that session.
+  </Step>
+  <Step title="haiflow checks for emitter topics">
+    haiflow looks up the session in `pipeline.json` to see whether it is configured to emit to any topics.
+  </Step>
+  <Step title="The output is published">
+    The agent's output is published to those topics. Events are persisted in Redis with delivery tracking, so nothing is lost in flight.
+  </Step>
+  <Step title="Subscribers receive the message">
+    Each subscriber agent receives the message, rendered through its own prompt template.
+  </Step>
+  <Step title="Busy subscribers queue automatically">
+    If a subscriber is already working, the message queues and drains automatically when the session frees up.
+  </Step>
+</Steps>
+
+<Note>
+  Because delivery is tracked in Redis, a subscriber that is mid task never drops an event. See [Queueing](/concepts/queueing) for how per-session queues drain.
+</Note>
+
+## A chain at a glance
+
+A pipeline is just topics connecting emitters to subscribers. Here is a four agent chain where each stage emits the topic the next stage listens for:
+
+```text
+Design Agent      --emits-->  design.ready
+Developer Agent   --subscribes design.ready, emits-->  code.ready
+Code Reviewer     --subscribes code.ready, emits-->  review.done
+QA Agent          --subscribes review.done
+```
+
+No agent knows about any other agent. They only know which topics they emit and which they subscribe to, and haiflow connects the dots.
+
+## Configuration
+
+Pipelines are defined in `pipeline.json`, which lives in `HAIFLOW_DATA_DIR` (default `/tmp/haiflow`). The file has three top level keys:
+
+- `topics`: each topic has an optional `description` and a list of `subscribers`. Every subscriber names a `session` and a `promptTemplate` that the incoming message is rendered into, plus optional `enabled` (set `false` to skip delivery) and `priority` (queue priority when the subscriber is busy).
+- `emitters`: maps a session name to the list of topics it publishes to when it finishes.
+- `pools`: worker pools for load-balancing and map-reduce. See [Worker pools](/guides/worker-pools).
+
+```json
+{
+  "topics": {
+    "design.ready": {
+      "description": "Design agent completed its analysis",
+      "subscribers": [
+        {
+          "session": "developer",
+          "promptTemplate": "Implement this design:\n\n{{message}}"
+        }
+      ]
+    },
+    "code.ready": {
+      "subscribers": [
+        {
+          "session": "code-reviewer",
+          "promptTemplate": "Review these changes:\n\n{{message}}"
+        }
+      ]
+    }
+  },
+  "emitters": {
+    "design-agent": ["design.ready"],
+    "developer": ["code.ready"]
+  }
+}
+```
+
+In this config the `design-agent` session emits to `design.ready`, which the `developer` session subscribes to. When the developer finishes, it emits to `code.ready`, which the `code-reviewer` session picks up.
+
+<Tip>
+  A worked example ships with the repo at `examples/chained-calc/pipeline-calc-chain.json`. Use it as a reference for a complete, runnable chain.
+</Tip>
+
+## Prompt template variables
+
+Each subscriber's `promptTemplate` is rendered with the event before it becomes the agent's next prompt. The following variables are available:
+
+| Variable | Description |
+| --- | --- |
+| `{{message}}` | The source agent's output text |
+| `{{topic}}` | The topic name the event was published to |
+| `{{sourceSession}}` | The session that emitted the event |
+| `{{taskId}}` | The source task id |
+
+A template can mix static instructions with these variables, for example:
+
+```text
+Review these changes from {{sourceSession}} (task {{taskId}}):
+
+{{message}}
+```
+
+## Outbound webhooks
+
+A topic can fire webhooks when events publish, so external systems are notified without polling. Add a `webhooks` array to any topic.
+
+<ParamField path="url" type="string" required>
+  The endpoint to call when the topic publishes an event.
+</ParamField>
+
+<ParamField path="method" type="string">
+  HTTP method. Defaults to `POST`.
+</ParamField>
+
+<ParamField path="headers" type="object">
+  Extra headers to send. Defaults to `{}` and is merged with `Content-Type: application/json`.
+</ParamField>
+
+<ParamField path="enabled" type="boolean">
+  Whether the webhook fires. Defaults to `true`.
+</ParamField>
+
+The POST body sent to each webhook looks like this:
+
+```json
+{
+  "topic": "design.ready",
+  "sourceSession": "design-agent",
+  "taskId": "task_123",
+  "message": "...the agent output...",
+  "publishedAt": "2026-06-29T10:00:00.000Z"
+}
+```
+
+Failed deliveries are retried automatically with exponential backoff, up to 5 attempts.
+
+## Publishing from outside
+
+You do not need an agent to start a chain. Inject events from n8n, scripts, or any service with `POST /publish`. The `message` you send is passed to subscriber templates as `{{message}}`.
+
+<ParamField path="topic" type="string" required>
+  The topic to publish to.
+</ParamField>
+
+<ParamField path="message" type="string" required>
+  The payload delivered to subscribers as `{{message}}`.
+</ParamField>
+
+<ParamField path="session" type="string">
+  The source session name. Defaults to `external`.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:3333/publish \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topic": "design.ready",
+    "message": "Build a calculator with add, subtract, multiply, and divide."
+  }'
+```
+
+<Note>
+  External publishes bypass the emitter allowlist and are attributed to the `external` session. See the safety section below.
+</Note>
+
+## Introspection
+
+Two endpoints let you inspect a running pipeline.
+
+<CodeGroup>
+
+```bash Get full config and recent events
+curl http://localhost:3333/pipeline \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+```bash List topic names
+curl http://localhost:3333/pipeline/topics \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+</CodeGroup>
+
+`GET /pipeline` returns the config, Redis status, and recent events. `GET /pipeline/topics` returns the list of topic names.
+
+## Safety
+
+Pipelines include several guardrails so a misconfigured chain cannot run away or lose work.
+
+<AccordionGroup>
+  <Accordion title="Circular protection">
+    If an emit eventually routes back to its origin, the cycle is detected and skipped, so a chain cannot loop on itself forever.
+  </Accordion>
+  <Accordion title="Emitter allowlist">
+    Only sessions listed under `emitters` can publish to a topic. The exception is `POST /publish`, which publishes as the `external` session.
+  </Accordion>
+  <Accordion title="Webhook retry">
+    Failed webhook deliveries are retried with exponential backoff, up to 5 attempts.
+  </Accordion>
+  <Accordion title="Event replay">
+    Unprocessed events are replayed on server restart, so work in flight survives a restart.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Worker pools" icon="users-gear" href="/guides/worker-pools">
+    Fan a single stage across many workers with map-reduce.
+  </Card>
+  <Card title="n8n integration" icon="diagram-project" href="/integrations/n8n">
+    Inject pipeline events from n8n with POST /publish.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    Full reference for the pipeline and publish endpoints.
+  </Card>
+</CardGroup>

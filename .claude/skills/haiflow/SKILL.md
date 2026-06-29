@@ -19,7 +19,7 @@ All endpoints except `/health`, `/version`, `/hooks/*`, and `/ingest/*` need `Au
 A consumer runs four steps. Always pass the **same `session`** to every call.
 
 ```bash
-# 1. Start (one session per concurrent stream of work). cwd is required unless the server pins HAIFLOW_CWD.
+# 1. Start (one session per concurrent stream of work). cwd is optional: it defaults to HAIFLOW_CWD if pinned, otherwise /tmp.
 curl -sX POST $H/session/start -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
   -d '{"session":"worker","cwd":"/path/to/project"}'      # -> {"started":true,"ready":true,...}
 

@@ -1,0 +1,11 @@
+<svg width="190" height="40" viewBox="0 0 190 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="2" y="4" width="32" height="32" rx="8" fill="#cc785c"/>
+  <g stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <circle cx="11" cy="14" r="2.8" fill="#fff" stroke="none"/>
+    <circle cx="25" cy="14" r="2.8" fill="#fff" stroke="none"/>
+    <circle cx="18" cy="26" r="2.8" fill="#fff" stroke="none"/>
+    <path d="M11 14 C 11 21, 18 20, 18 26"/>
+    <path d="M25 14 C 25 21, 18 20, 18 26"/>
+  </g>
+  <text x="44" y="27" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#1a1a1a">haiflow</text>
+</svg>

@@ -1,0 +1,118 @@
+---
+title: Architecture
+description: "How haiflow drives Claude Code: the server, tmux sessions, the hook lifecycle, and how responses are captured."
+icon: "sitemap"
+---
+
+haiflow turns the local `claude` CLI into an HTTP service. It does this without a custom Claude integration: it runs the real CLI inside a detached `tmux` session, sends prompts into the terminal, and listens for Claude Code hooks to know when a task finishes and where its output lives. This page explains the moving parts and the exact path a request takes from `POST /trigger` to a captured response.
+
+## Components
+
+| Component | What it is |
+| --- | --- |
+| HTTP server | A [Bun](https://bun.sh) server (`src/index.ts`) that exposes the REST API and receives hook events. |
+| tmux sessions | One detached `tmux` session per haiflow session, each running the local `claude` CLI started with `--permission-mode auto`. |
+| Hooks | Five Claude Code hooks registered into `~/.claude/settings.json`. They are thin shell forwarders that POST session events back to the server. |
+| Queue | A per-session FIFO queue that serializes prompts so Claude works on one task at a time. |
+| Response store | Captured assistant messages, keyed by task id, served over HTTP and SSE. |
+| Task ledger | A durable SQLite database (`haiflow.db`) that records what each task actually did. |
+| Redis (optional) | Backs [pipeline](/guides/pipelines) persistence when you chain agents with pub/sub. |
+
+Each haiflow session maps to exactly one `tmux` session running one `claude` process. Sessions are independent, so you can run many in parallel and fan work across them with [worker pools](/guides/worker-pools).
+
+## Request-to-response lifecycle
+
+A single triggered prompt flows through the system like this:
+
+<Steps>
+  <Step title="Start a session">
+    `POST /session/start` spawns `claude` in a detached `tmux` session with `--permission-mode auto`.
+  </Step>
+  <Step title="Link the Claude session">
+    The `SessionStart` hook links a Claude session id to the haiflow session. This linking is what makes responses capturable. A session that never links can never have its responses captured.
+  </Step>
+  <Step title="Send the prompt">
+    `POST /trigger` sends the prompt into the TUI via `tmux send-keys`, or queues it if Claude is busy, and assigns a task id.
+  </Step>
+  <Step title="Capture on completion">
+    On task completion the `Stop` hook fires. The server extracts the assistant messages from the session transcript and saves them keyed by task id.
+  </Step>
+  <Step title="Mine the transcript into the ledger">
+    The same transcript is mined into the ledger: ordered tool calls, commands run, files changed, diffs, token usage, model, and timing. See the [task ledger](/concepts/task-ledger).
+  </Step>
+  <Step title="Auto-drain the queue">
+    The [queue](/concepts/queueing) auto-drains. When Claude finishes one task, the next queued prompt is sent automatically.
+  </Step>
+</Steps>
+
+<Note>
+Step 2 is the load-bearing one. Capture depends on the `SessionStart` hook firing and linking the Claude session id. If hooks are not wired, a session can run but never return output.
+</Note>
+
+## Data flow
+
+```text
+POST /trigger ---> Queue (FIFO) ---> tmux session (claude) ---> hooks fire on session events ---> Responses ---> GET /responses/:id and GET /responses/:id/stream (SSE)
+```
+
+You read results either by polling for the final answer or by streaming tokens as they arrive:
+
+<CodeGroup>
+```bash Poll
+curl http://localhost:3333/responses/$TASK_ID \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+```bash Stream (SSE)
+curl -N http://localhost:3333/responses/$TASK_ID/stream \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+</CodeGroup>
+
+## Hooks
+
+haiflow's design rests on [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code). The `haiflow setup` step registers five hooks into `~/.claude/settings.json`. Each one POSTs an event to the server at `POST /hooks/*`.
+
+The hooks are thin HTTP forwarders, which keeps them safe to leave installed:
+
+- If the server is not running, they silently no-op.
+- They ignore unknown session ids, so they never interfere with non-orchestrated Claude sessions you start by hand.
+
+<Info>
+The `/hooks/*` endpoints are restricted to localhost. Hooks run on the same machine as the server, so external clients cannot forge hook events. See [Security](/security).
+</Info>
+
+### What each hook does
+
+| Hook | Role |
+| --- | --- |
+| `SessionStart` | Links the Claude session id to the haiflow session. This enables capture. |
+| `UserPromptSubmit` | Records the prompt. |
+| `Stop` | Signals task completion. Triggers response capture, the ledger write, and any [pipeline](/guides/pipelines) emit. |
+| `SessionEnd` | Marks the session offline. |
+| `Notification` | Flags a session as waiting when Claude is blocked needing input mid-task. The watchdog watches this. |
+
+<Warning>
+Wiring hooks is the number-one silent failure in haiflow. If triggers run but `GET /responses/:id` never returns anything, your hooks are almost certainly not registered or not reaching the server. Start with the [troubleshooting guide](/guides/troubleshooting) and the [sessions concept](/concepts/sessions) to confirm a session actually linked.
+</Warning>
+
+### Transcript safety
+
+The `Stop` hook reads the session transcript to extract assistant messages, so it is deliberately conservative about which files it will open. It only reads transcripts under `~/.claude` or `/tmp/claude`, resolves symlinks with `realpath`, and requires the resolved path to be a regular file. A symlink pointing elsewhere, or anything that is not a plain file, is refused.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Sessions" icon="terminal" href="/concepts/sessions">
+    What a session is, how linking works, and how to tell when one is healthy.
+  </Card>
+  <Card title="Queueing" icon="list-check" href="/concepts/queueing">
+    How prompts serialize per session and how the queue auto-drains.
+  </Card>
+  <Card title="Task ledger" icon="database" href="/concepts/task-ledger">
+    The durable record of tool calls, diffs, tokens, and timing for every task.
+  </Card>
+  <Card title="Pipelines" icon="diagram-project" href="/guides/pipelines">
+    Chain agents with event-driven pub/sub, emitted from the `Stop` hook.
+  </Card>
+</CardGroup>

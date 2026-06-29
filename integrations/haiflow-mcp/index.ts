@@ -105,7 +105,7 @@ server.registerTool(
     description: "Start a Claude Code session in a detached tmux session. Fails (409) if the session can't link its hooks.",
     inputSchema: {
       session: z.string().optional().describe('Session name (default "default")'),
-      cwd: z.string().describe("Working directory for Claude (required unless the server pins HAIFLOW_CWD)"),
+      cwd: z.string().optional().describe("Working directory for Claude. Optional: when omitted, haiflow uses HAIFLOW_CWD if the server pins one, otherwise it falls back to /tmp."),
     },
   },
   async ({ session = "default", cwd }) =>
