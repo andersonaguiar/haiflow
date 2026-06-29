@@ -50,10 +50,8 @@
               "guides/cli",
               "guides/dashboard",
               "guides/pipelines",
-              "guides/worker-pools",
               "guides/fire-and-forget",
               "guides/inbound-webhooks",
-              "guides/github-bridge",
               "guides/usage-and-savings",
               "guides/troubleshooting"
             ]
@@ -61,8 +59,7 @@
           {
             "group": "Integrations",
             "pages": [
-              "integrations/mcp",
-              "integrations/n8n"
+              "integrations/mcp"
             ]
           },
           {

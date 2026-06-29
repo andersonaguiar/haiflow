@@ -14,7 +14,7 @@ The server speaks MCP over stdio. Diagnostics go to stderr, so they never corrup
 
 ## Tools
 
-The server registers eight tools. Most map directly to a haiflow endpoint, so the same rules apply: every call needs a valid `HAIFLOW_API_KEY`, and sessions require haiflow's hooks to be wired (see [Prerequisites](#prerequisites)).
+The server registers seven tools. Most map directly to a haiflow endpoint, so the same rules apply: every call needs a valid `HAIFLOW_API_KEY`, and sessions require haiflow's hooks to be wired (see [Prerequisites](#prerequisites)).
 
 | Tool | What it does | Key arguments |
 | --- | --- | --- |
@@ -25,7 +25,6 @@ The server registers eight tools. Most map directly to a haiflow endpoint, so th
 | `haiflow_stop_session` | Stop a session. | `session` |
 | `haiflow_status` | Status of one session, or all sessions when none is given. | `session` |
 | `haiflow_doctor` | Health check. Catches the case where tmux is running but hooks are not linked. | `session` |
-| `haiflow_map` | Map a list of items across a worker pool in parallel, then reduce. | `items`, `pool`, `mapTemplate`, `reduceSession`, `reducePromptTemplate` |
 
 ### Run versus trigger
 
@@ -48,10 +47,6 @@ No task with that id.
 <Tip>
 For long jobs, do not block on `haiflow_run`. Prefer `haiflow_trigger` with a `callbackUrl` ([fire and forget](/guides/fire-and-forget)), or `haiflow_trigger` followed by `haiflow_get_response` polling on the returned id.
 </Tip>
-
-### Fan out with map
-
-`haiflow_map` distributes `items` across a [worker pool](/guides/worker-pools), runs `mapTemplate` per item in parallel, then reduces the results through `reduceSession` using `reducePromptTemplate`. Use it when you have a batch of similar units of work and want a single combined answer back.
 
 ## Configuration
 
@@ -130,7 +125,7 @@ Each host points at the same `index.ts` and passes the two environment variables
   </Tab>
 </Tabs>
 
-Once registered, restart or reload the host and the eight `haiflow_*` tools become available to the agent.
+Once registered, restart or reload the host and the seven `haiflow_*` tools become available to the agent.
 
 ## Verify the connection
 
@@ -154,9 +149,6 @@ Inside a Claude Code session, you do not need the MCP server at all. The bundled
   </Card>
   <Card title="Fire and forget" icon="paper-plane" href="/guides/fire-and-forget">
     Trigger long jobs with a callback instead of blocking.
-  </Card>
-  <Card title="Worker pools" icon="diagram-project" href="/guides/worker-pools">
-    Back `haiflow_map` with a pool of parallel workers.
   </Card>
   <Card title="Security" icon="shield" href="/security">
     API keys, redaction, and what leaves the box.

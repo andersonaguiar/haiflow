@@ -54,7 +54,7 @@ In `production` mode haiflow fails closed at boot: it refuses to start on an ins
 | `HAIFLOW_REDACT_EXTRA` | _(none)_ | Extra redaction patterns, as a JSON array of regex strings. Example: `["ACME-\\d{4,}","internal-[a-f0-9]{8}"]`. |
 
 <Note>
-Guardrails and redaction are mitigations, not a sandbox. Anyone who can get a prompt executed can run code as the operator. The real perimeter is the API key, the hook localhost restriction, the webhook signatures, and the bridge allowlists. See [Security](/security).
+Guardrails and redaction are mitigations, not a sandbox. Anyone who can get a prompt executed can run code as the operator. The real perimeter is the API key, the hook localhost restriction, and the webhook signatures. See [Security](/security).
 </Note>
 
 ## Watchdog
@@ -66,7 +66,7 @@ Catches sessions wedged on a permission prompt.
 | `HAIFLOW_TASK_TIMEOUT_SEC` | `0` | Hard per-task timeout in seconds. `0` disables it. A task running longer is flagged (and recovered if recovery is on). |
 | `HAIFLOW_WAITING_GRACE_SEC` | `120` | How long a session flagged `waiting` by Claude's `Notification` hook may stay blocked before the watchdog acts. |
 | `HAIFLOW_WATCHDOG_RECOVER` | `false` | When `true`, auto-recover a wedged session (send Escape, mark the task `timed_out`, drain the queue). Default is alert-only. |
-| `HAIFLOW_WATCHDOG_INTERVAL_MS` | `15000` | How often the watchdog scans for wedged sessions and reaps timed-out map runs. |
+| `HAIFLOW_WATCHDOG_INTERVAL_MS` | `15000` | How often the watchdog scans for wedged sessions. |
 | `HAIFLOW_USAGE_ALERT_TOKENS` | _(none)_ | When set, `GET /usage/window` flags `alert: true` once the rolling 5h token total crosses it. Alert-only, never throttles. |
 
 ## Fire-and-forget callbacks
@@ -77,13 +77,6 @@ Controls the per-`/trigger` `callbackUrl` completion webhook.
 | --- | --- | --- |
 | `HAIFLOW_ALLOW_TRIGGER_CALLBACK` | `false` | Enables `callbackUrl`. Off by default because an arbitrary callback URL is an SSRF surface. |
 | `HAIFLOW_CALLBACK_ALLOW_HOSTS` | _(none)_ | Comma-separated host allowlist for `callbackUrl`. With it set, callbacks to any other host return `400`. |
-
-## Worker pools & map-reduce
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `HAIFLOW_MAP_MAX_ITEMS` | `200` | Max items one `POST /map` call may fan across a pool. |
-| `HAIFLOW_MAP_TIMEOUT_SEC` | `1800` | How long a map run waits for stragglers before the reducer fires with partial results. |
 
 ## Dashboard terminal
 
@@ -106,30 +99,3 @@ For the `POST /ingest/:source` gateway. See [Inbound webhooks](/guides/inbound-w
 | `HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS` | `false` | When `true`, accept the replay risk and keep serving ingest without Redis. Otherwise the gateway fails closed (`503`). |
 | `HAIFLOW_INGEST_NONCE_TTL_SEC` | `604800` | How long a signed delivery's replay nonce is remembered (7 days). Bounds how often a captured webhook can be replayed for schemes without a signed timestamp. |
 | `HAIFLOW_INGEST_RATE_PER_MIN` | `120` | Per-source rate limit (requests/minute). Exceeding it returns `429`. Set `0` to disable. |
-
-## n8n
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `N8N_URL` | `http://localhost:5678` | n8n instance URL. |
-| `N8N_API_KEY` | _(none)_ | n8n API key for workflow integration. |
-
-## GitHub bridge
-
-For `haiflow github`. See [GitHub bridge](/guides/github-bridge).
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `HAIFLOW_URL` | `http://localhost:$PORT` | Base URL the bridge calls. |
-| `GITHUB_WEBHOOK_SECRET` | _(none)_ | **Required.** Webhook secret configured on the GitHub App/repo webhook. |
-| `GITHUB_ALLOWED_REPOS` | _(none)_ | Comma-separated repo allowlist. Required to act. |
-| `GITHUB_ALLOWED_SENDERS` | _(none)_ | Comma-separated sender allowlist. Required to act. |
-| `GITHUB_SESSION` | `default` | Which session the bridge drives (its cwd should be the cloned repo). |
-| `GITHUB_PORT` | `3334` | Port the bridge listens on for GitHub webhooks. |
-| `GITHUB_TRIGGER_PHRASE` | `@haiflow` | Phrase that triggers the bridge in a comment. |
-| `GITHUB_POST_COMMENTS` | `true` | Whether to post Claude's summary back as a GitHub comment via `gh`. |
-| `GITHUB_RESPONSE_TIMEOUT` | `600` | Seconds the bridge waits on the Claude response stream before giving up (max `600`). |
-
-<Warning>
-Both `GITHUB_ALLOWED_REPOS` and `GITHUB_ALLOWED_SENDERS` are the trust boundary. With either empty, every webhook is refused. Anyone who can comment on an allowlisted repo can drive Claude, so keep both lists tight.
-</Warning>
