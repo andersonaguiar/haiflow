@@ -1,0 +1,150 @@
+---
+title: Dashboard
+description: "The built-in web UI for monitoring and controlling every session in real time."
+icon: "gauge"
+---
+
+The dashboard is a live control panel for every haiflow session. From one browser tab you can watch what each session is doing, read its prompts and responses, inspect the full task timeline with token usage and cost avoided, and act on a session: start it, stop it, send a prompt, or clear its queue. When a session wedges, you can take the wheel and type directly into it.
+
+## Open it
+
+The dashboard is served by the same Bun server, with no extra setup. Open it in a browser:
+
+```
+http://localhost:3333/dashboard
+```
+
+Enter your `HAIFLOW_API_KEY` to authenticate. This is the same secret you chose to protect the HTTP API, not a paid Anthropic key. Once authenticated, the view auto-refreshes every 3 seconds, so what you see tracks your sessions in near real time without a manual reload.
+
+<Note>
+The dashboard talks to the same REST API documented in the [API reference](/api-reference/introduction). Anything you can do here you can also do with `curl` or the CLI.
+</Note>
+
+## Layout
+
+The dashboard is split into two panels.
+
+<CardGroup cols={2}>
+  <Card title="Left: sessions" icon="layer-group">
+    Every session with a live status badge: `idle`, `busy`, or `offline`. Select one to drive the right panel. Remove an offline session with its `x` control.
+  </Card>
+  <Card title="Right: activity" icon="rectangle-list">
+    The current prompt while the selected session is busy, plus a tabbed Queue / Responses / History view. Items expand to show the full prompt and response text.
+  </Card>
+</CardGroup>
+
+### Left panel: sessions
+
+The left panel lists all sessions. Each carries a status badge so you can see the fleet at a glance:
+
+| Badge | Meaning |
+| --- | --- |
+| `idle` | Session is up and ready for the next prompt. |
+| `busy` | Claude is working on a task right now. |
+| `offline` | The session's tmux process is not running. |
+
+Use the `x` control on an offline session to remove it and clear it from the list. For the full lifecycle behind these states, see [Sessions](/concepts/sessions).
+
+### Right panel: activity
+
+When the selected session is `busy`, the right panel shows the current prompt at the top so you always know what Claude is working on. Below it sits a tabbed view:
+
+<Tabs>
+  <Tab title="Queue">
+    Prompts waiting to run on this session, in order. Expand an item to read its full prompt text.
+  </Tab>
+  <Tab title="Responses">
+    Captured responses for the session. Expand an item to read the full response text.
+  </Tab>
+  <Tab title="History">
+    The complete task timeline (see below), with usage and cost-avoided figures.
+  </Tab>
+</Tabs>
+
+## History tab
+
+The History tab is the dashboard's view onto the task ledger. For every task it records:
+
+- The tool / command / diff timeline of what Claude did.
+- Token usage for the task.
+- Duration.
+- "API cost avoided": the equivalent metered API spend you did not pay, because haiflow runs on a flat Claude Code subscription.
+
+Above the per-task rows, History also surfaces the rolling **5h** and **7d** usage windows so you can see how close you are to your subscription's limits at a glance.
+
+<CardGroup cols={2}>
+  <Card title="Task ledger" icon="book" href="/concepts/task-ledger">
+    How every task, tool call, and diff is recorded and queried.
+  </Card>
+  <Card title="Usage and savings" icon="piggy-bank" href="/guides/usage-and-savings">
+    The rolling windows and how "API cost avoided" is calculated.
+  </Card>
+</CardGroup>
+
+## Live terminal
+
+Each session has a live terminal in the dashboard. By default it is **read-only**: you watch Claude work in the browser exactly as you would with a read-only tmux attach, without any risk of typing over it.
+
+When a session is wedged (for example, stuck on a permission prompt) you can click **Take control** to switch to a writable attach and type directly into the session from the browser. While you hold the wheel:
+
+- Auto-drain pauses, so the queue is not typed over your input.
+- You can answer the prompt, send keystrokes, or unstick the session by hand.
+
+This is gated by the API key, and it can be disabled entirely by setting `HAIFLOW_ALLOW_TAKEOVER=false` (read-only mode always works). See the [Configuration](/configuration) reference for that variable.
+
+<Warning>
+The writable terminal is a powerful, operator-only control. It bypasses the prompt structural checks **and** the guardrail skill, so a session you drive by hand has none of haiflow's usual prompt protections.
+
+The underlying `GET /terminal` endpoint passes the API key as a URL query parameter, which can be captured by reverse-proxy or browser logs. Only expose `/terminal` over localhost or a trusted tunnel, or set `HAIFLOW_ALLOW_TAKEOVER=false`. See [Security](/security).
+</Warning>
+
+## Actions
+
+From the right panel you can act on the selected session without leaving the dashboard:
+
+| Action | What it does |
+| --- | --- |
+| Start | Bring a session online. |
+| Stop | Stop a running session. |
+| Send prompt | Trigger a prompt on the session (queued if it is busy). |
+| Clear queue | Drop the session's pending prompts. |
+| Clear responses | Clear the session's captured responses. |
+
+Every one of these maps to an authenticated REST call. For example, sending a prompt from the dashboard is the same as:
+
+```bash
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "run the test suite", "session": "worker", "id": "from-dashboard"}'
+```
+
+And stopping a session is the same as:
+
+```bash
+curl -X POST http://localhost:3333/session/stop \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "worker"}'
+```
+
+<Tip>
+If a session sits `busy` forever or a prompt never returns a response, the hooks are probably not wired. Start with [Troubleshooting](/guides/troubleshooting).
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Sessions" icon="layer-group" href="/concepts/sessions">
+    The session lifecycle behind the idle / busy / offline badges.
+  </Card>
+  <Card title="Task ledger" icon="book" href="/concepts/task-ledger">
+    What powers the History timeline and usage figures.
+  </Card>
+  <Card title="Security" icon="shield-halved" href="/security">
+    Why the writable terminal is operator-only and how to lock it down.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Diagnose wedged sessions and missing responses.
+  </Card>
+</CardGroup>

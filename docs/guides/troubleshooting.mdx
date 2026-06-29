@@ -1,0 +1,288 @@
+---
+title: Troubleshooting
+description: "Diagnose unwired hooks, missing responses, wedged sessions, and other common issues."
+icon: "wrench"
+---
+
+Most haiflow problems trace back to a handful of root causes: hooks that were never linked, a trigger sent to the wrong session, a session wedged on a permission prompt, or state lost because data lives in a temporary directory. This page walks through each symptom, the signal that confirms it, and the fix.
+
+When something is off, start with the doctor. It catches the most common failure before you waste time guessing.
+
+```bash
+haiflow doctor
+```
+
+## Start with the doctor
+
+`GET /doctor` is your first stop for any session that is misbehaving. Pass `?session=` to inspect one session, or omit it to get a report for every session.
+
+<CodeGroup>
+```bash One session
+curl -s http://localhost:3333/doctor?session=worker \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+```bash All sessions
+curl -s http://localhost:3333/doctor \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+</CodeGroup>
+
+The CLI wraps the same endpoint:
+
+```bash
+haiflow doctor worker
+```
+
+Each report carries the fields below. Read `healthy` first, then use the others to narrow down why.
+
+<ResponseField name="status" type="string">
+The session's current lifecycle state.
+</ResponseField>
+
+<ResponseField name="tmuxRunning" type="boolean">
+Whether the underlying tmux session is alive.
+</ResponseField>
+
+<ResponseField name="hooksLinked" type="boolean">
+Whether the Claude Code hooks are wired into `~/.claude/settings.json`. This is the field that catches the number-one silent failure.
+</ResponseField>
+
+<ResponseField name="healthy" type="boolean">
+The overall verdict. `false` means at least one check failed.
+</ResponseField>
+
+<ResponseField name="note" type="string">
+A human-readable explanation when something is wrong.
+</ResponseField>
+
+## Hooks not wired (the number-one silent failure)
+
+This is the single most common reason haiflow looks broken. tmux is running, the session appears up, but responses are never captured and prompts pile up forever.
+
+The tell from `GET /doctor` is unmistakable:
+
+```json
+{
+  "status": "...",
+  "tmuxRunning": true,
+  "hooksLinked": false,
+  "healthy": false,
+  "note": "..."
+}
+```
+
+**Symptoms**
+
+- `POST /session/start` returns `409`.
+- Sessions sit busy forever and never go idle.
+- Responses are never captured, so `GET /responses/:id` never returns the result.
+
+**Fix**
+
+<Steps>
+  <Step title="Install the hooks">
+    Run `haiflow setup` to wire the Claude Code hooks into `~/.claude/settings.json`.
+
+    ```bash
+    haiflow setup
+    ```
+  </Step>
+  <Step title="Restart the session">
+    Stop and start the session so it picks up the newly linked hooks.
+
+    ```bash
+    haiflow stop worker
+    haiflow start worker --cwd /path/to/project
+    ```
+  </Step>
+  <Step title="Confirm with the doctor">
+    Re-run the doctor and verify `hooksLinked: true` and `healthy: true`.
+
+    ```bash
+    haiflow doctor worker
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+`haiflow init` runs hooks, start, and a smoke test end to end, so it is the fastest way to prove the whole pipeline works on a fresh setup. See the [CLI reference](/guides/cli).
+</Tip>
+
+## No response, or the wrong response
+
+If a trigger seems to vanish or you get back a result that does not match what you asked, the cause is almost always a session mismatch.
+
+You must pass the **same session** you triggered on to every read path: `GET /responses/:id`, the SSE stream, and `/status`. Omitting `session` silently targets the `default` session, so a response captured on `worker` will look missing if you query without naming it.
+
+<Warning>
+Omitting `session` does not error. It quietly falls back to the `default` session, which is why a missing response is so easy to misdiagnose.
+</Warning>
+
+```bash
+# Trigger on the worker session
+curl -s http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "summarise the README", "session": "worker", "id": "sum-1"}'
+
+# Read it back on the SAME session
+curl -s "http://localhost:3333/responses/sum-1?session=worker" \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+Checklist when a response does not show up:
+
+- Confirm you used the same `session` on the trigger and the read.
+- Run `haiflow doctor <session>` to rule out unlinked hooks.
+- Remember that an offline session returns `503` on trigger, unless the session is ephemeral and auto-starts. Ephemeral start needs a resolvable `cwd`.
+
+<Note>
+See [Sessions](/concepts/sessions) for how the `default` session, named sessions, and ephemeral sessions differ.
+</Note>
+
+## Session wedged on a permission prompt
+
+A session stuck on a permission prompt shows up with `status` of `waiting`. It is alive but blocked, waiting for input it will never get on its own.
+
+**Recover manually** with `POST /interrupt`. Use `mode` `escape` to dismiss the prompt, and optionally include a steering prompt to redirect the session:
+
+```bash
+curl -s http://localhost:3333/interrupt \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "worker", "mode": "escape", "prompt": "skip that step and continue"}'
+```
+
+**Let the watchdog handle it** by configuring the background watchdog to act automatically. By default it is alert-only: it tells you something is wrong but does not intervene.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `HAIFLOW_TASK_TIMEOUT_SEC` | none | Hard per-task timeout. Set `0` to disable. |
+| `HAIFLOW_WAITING_GRACE_SEC` | `120` | How long a `waiting` session is tolerated before the watchdog reacts. |
+| `HAIFLOW_WATCHDOG_RECOVER` | `false` | Set `true` to auto-recover: send Escape, mark the task `timed_out`, and drain. |
+
+<Info>
+With `HAIFLOW_WATCHDOG_RECOVER=true`, the watchdog sends Escape, marks the task `timed_out`, and drains the queue so the session can move on. Leave it unset to keep the default alert-only behaviour.
+</Info>
+
+## `[REDACTED:type]` markers in output
+
+If outbound text contains markers like `[REDACTED:type]`, nothing is broken. That is the best-effort secret redaction doing its job before text leaves the server.
+
+Redaction is controlled by `HAIFLOW_REDACT` and is on by default. If you need raw output and understand the risk, that is the knob to change.
+
+<Check>
+Redaction markers mean a potential secret was caught and masked, not that a response was truncated or corrupted.
+</Check>
+
+## History lost after a reboot
+
+If your task ledger and responses disappear after a restart, the cause is the data directory. `HAIFLOW_DATA_DIR` defaults to `/tmp/haiflow`, and `/tmp` is wiped on reboot.
+
+Point it at a persistent directory to keep the ledger and responses across restarts:
+
+```bash
+export HAIFLOW_DATA_DIR=/var/lib/haiflow
+```
+
+<Tip>
+See the [Task ledger](/concepts/task-ledger) for what is stored, and set `HAIFLOW_DATA_DIR` before you start the server so the data lands in the right place from the first write.
+</Tip>
+
+## `401 Unauthorized`
+
+A `401` means the bearer key the client sent does not match the server's `HAIFLOW_API_KEY`.
+
+The CLI and the MCP server both read `HAIFLOW_API_KEY` from the environment, so a `401` usually means the value differs between where the server runs and where the client runs.
+
+```bash
+# The client and server must agree on this value
+export HAIFLOW_API_KEY=your-chosen-secret
+```
+
+<Info>
+`HAIFLOW_API_KEY` is a secret you choose to protect your server. It is not a paid Anthropic key: haiflow runs on your Claude Code subscription, so there are no per-token API costs.
+</Info>
+
+## Redis unavailable
+
+haiflow degrades rather than crashing when Redis is down, but two behaviours change:
+
+- Pipeline events still fire, but they are **not persisted**.
+- The signed-webhook gateway **fails closed** with `503`, unless you set `HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS=true`.
+
+```bash
+# Allow the signed-webhook gateway to accept requests without Redis
+export HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS=true
+```
+
+<Warning>
+Allowing ingest without Redis trades durability for availability. Inbound events are accepted but their persistence guarantees no longer hold.
+</Warning>
+
+## Observability: logs and health checks
+
+haiflow emits structured JSON logs to stdout and stderr for every key event, so most issues are visible in the log stream. Events include `server_started`, `session_started`, `trigger_sent`, `trigger_queued`, `response_saved`, `auth_rejected`, and `watchdog_triggered`, among many more.
+
+```bash
+# Watch for rejected auth and watchdog activity in the log stream
+haiflow serve | grep -E "auth_rejected|watchdog_triggered"
+```
+
+For a full system health check covering the server, n8n, sessions, and the pipeline, run:
+
+```bash
+bun run doctor
+```
+
+And to confirm which build a remote server is on, hit `GET /version`:
+
+```bash
+curl -s http://localhost:3333/version \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+<Note>
+Mapping a symptom to the event that fired (or did not fire) is the quickest way to localise a problem. For example, a `trigger_sent` with no following `response_saved` points straight back at unlinked hooks.
+</Note>
+
+## Quick reference
+
+<AccordionGroup>
+  <Accordion title="Trigger returns 409">
+    The session's hooks are not linked. Run `haiflow setup`, restart the session, then `haiflow doctor` to confirm `hooksLinked: true`.
+  </Accordion>
+  <Accordion title="Trigger returns 503">
+    The session is offline. Start it, or use an ephemeral session with a resolvable `cwd` so it can auto-start.
+  </Accordion>
+  <Accordion title="Trigger returns 401">
+    The client's bearer key does not match the server's `HAIFLOW_API_KEY`. Align the value across both environments.
+  </Accordion>
+  <Accordion title="Response never appears">
+    You probably queried without the `session` you triggered on, which falls back to `default`. Pass the same session to `/responses/:id`, the SSE stream, and `/status`.
+  </Accordion>
+  <Accordion title="Session stuck on waiting">
+    It is wedged on a permission prompt. Recover with `POST /interrupt` (mode `escape`), or enable `HAIFLOW_WATCHDOG_RECOVER=true`.
+  </Accordion>
+  <Accordion title="Ledger empty after reboot">
+    `HAIFLOW_DATA_DIR` is on `/tmp/haiflow`, which is wiped on reboot. Point it at a persistent directory.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Go from nothing to your first captured response.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/guides/cli">
+    `doctor`, `setup`, `init`, and every other subcommand.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    How hooks, tmux, and the server fit together.
+  </Card>
+  <Card title="Sessions" icon="layer-group" href="/concepts/sessions">
+    Named, default, and ephemeral sessions explained.
+  </Card>
+</CardGroup>

@@ -1,0 +1,253 @@
+---
+title: Sessions
+description: "Named, detached tmux sessions that run Claude Code in a working directory, and their full lifecycle."
+icon: "window-maximize"
+---
+
+A session is a named, detached tmux session that runs the `claude` CLI in a working directory (`cwd`). Every prompt you send through the API lands in a session, and each session keeps its own status, queue, and captured responses. The default session name is `default`, so a single-project setup never has to name anything.
+
+Sessions are detached, so they keep running after the request that started them returns and survive your terminal closing. You drive them entirely over HTTP, and you can attach a real terminal to watch at any time.
+
+<Note>
+One session runs one Claude Code agent at a time. To run work in parallel, start several named sessions (a [worker pool](/guides/worker-pools)) and fan tasks across them.
+</Note>
+
+## Start a session
+
+`POST /session/start` creates the tmux session and launches Claude Code inside it.
+
+```bash
+curl -X POST http://localhost:3333/session/start \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"cwd": "/path/to/your/project", "session": "worker"}'
+```
+
+<ParamField path="cwd" type="string">
+Absolute path to the working directory Claude Code runs in. Optional: when omitted, haiflow uses `HAIFLOW_CWD` if the server pins one, otherwise it falls back to `/tmp` and the response carries `cwdDefaulted: true`. See [CWD locking](#cwd-locking).
+</ParamField>
+
+<ParamField path="session" type="string" default="default">
+The session name. Reuse the same name to route later prompts to this session.
+</ParamField>
+
+A successful start returns the session metadata:
+
+```json
+{
+  "started": true,
+  "session": "worker",
+  "tmux": "worker",
+  "cwd": "/path/to/your/project",
+  "ready": true
+}
+```
+
+<ResponseField name="ready" type="boolean">
+`true` once the TUI is confirmed ready. `false` means the session linked but its TUI readiness could not be confirmed in time. It is still usable: prompts will queue and run as soon as the agent is ready.
+</ResponseField>
+
+When the server forces a working directory with `HAIFLOW_CWD` that differs from the requested `cwd`, the response also includes `cwdOverridden: true`, and `cwd` reflects the forced value:
+
+```json
+{
+  "started": true,
+  "session": "worker",
+  "tmux": "worker",
+  "cwd": "/forced/server/dir",
+  "ready": true,
+  "cwdOverridden": true
+}
+```
+
+When you omit `cwd` and no `HAIFLOW_CWD` is pinned, the session starts in `/tmp` and the response includes `cwdDefaulted: true`. Pass a `cwd`, or set `HAIFLOW_CWD`, to run in a real project directory.
+
+### When start fails with 409
+
+If the session never links a Claude session id within `HAIFLOW_START_READY_TIMEOUT_MS` (default `15000`), the dead pane is torn down and the call returns `409`. This almost always means the Claude Code hooks are not wired, so nothing reports the session id back to the server.
+
+<Warning>
+A `409` from `/session/start` is the number-one silent-failure signal. Run `haiflow setup` to wire the hooks and `haiflow doctor` to verify them, then start the session again.
+</Warning>
+
+## Session status
+
+The `status` field is always one of three values:
+
+| Status | Meaning |
+| --- | --- |
+| `idle` | Ready and waiting for a prompt. Sending now runs immediately. |
+| `busy` | Working on a prompt. New prompts queue behind the current one. |
+| `offline` | Not running. The tmux session has stopped or has not been started. |
+
+A session blocked mid-task (for example on a permission prompt) is not a fourth status: its `status` stays `busy`, and haiflow surfaces the block through a separate boolean `waiting: true` field (alongside `waitingMessage` and `waitingSince`). See [Waiting sessions](#waiting-sessions).
+
+Query one session with `GET /status`:
+
+```bash
+curl "http://localhost:3333/status?session=worker" \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+```json
+{
+  "session": "worker",
+  "status": "busy",
+  "since": "2026-06-29T10:15:02.000Z",
+  "queueLength": 2,
+  "currentPrompt": "explain this codebase"
+}
+```
+
+When the session is blocked needing input, the same response also carries `waiting: true`, `waitingMessage`, and `waitingSince`, while `status` stays `busy`.
+
+List every session with `GET /sessions`:
+
+```bash
+curl http://localhost:3333/sessions \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+```json
+[
+  { "session": "default", "status": "idle", "tmux": "default" },
+  { "session": "worker", "status": "busy", "tmux": "worker" }
+]
+```
+
+<Tip>
+`queueLength` tells you how much work is stacked up behind the current prompt. See [Queueing](/concepts/queueing) for how prompts line up and drain, and the [Dashboard](/guides/dashboard) for a live view of every session.
+</Tip>
+
+## Waiting sessions
+
+When a session is blocked mid-task needing input, such as a permission prompt it cannot answer on its own, haiflow flags it with a boolean `waiting: true` field on its status while the `status` itself stays `busy`. Claude Code's `Notification` hook sets this, and a background watchdog also watches for it, governed by `HAIFLOW_WAITING_GRACE_SEC` (default `120`).
+
+A blocked (`waiting`) session is not stuck forever. You can unblock it by steering it (see [Interrupt and steer](#interrupt-and-steer)), and [Troubleshooting](/guides/troubleshooting) covers recovery in depth.
+
+## Watch a session
+
+To watch a session live in a real terminal without typing into it, attach in read-only mode:
+
+```bash
+tmux attach -t worker -r
+```
+
+The `-r` flag keeps the attach read-only, so you can observe the agent working without interfering with it. Detach with the usual tmux key sequence.
+
+## Interrupt and steer
+
+`POST /interrupt` breaks into a running session. Use it to unstick a session wedged on a permission prompt, or to redirect an agent mid-task.
+
+```bash
+curl -X POST http://localhost:3333/interrupt \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "worker", "mode": "escape", "prompt": "stop and run the tests first"}'
+```
+
+<ParamField path="session" type="string" required>
+The session to interrupt.
+</ParamField>
+
+<ParamField path="mode" type="string" default="escape">
+How to interrupt. `escape` sends an escape (the default). `ctrl-c` sends an interrupt signal.
+</ParamField>
+
+<ParamField path="prompt" type="string">
+Optional steering prompt typed in after the interrupt settles. Use it to redirect the agent in the same call.
+</ParamField>
+
+The response confirms what happened:
+
+```json
+{
+  "interrupted": true,
+  "session": "worker",
+  "mode": "escape",
+  "steered": true
+}
+```
+
+`steered` is `true` when a steering `prompt` was supplied and typed in. The call returns `404` if the session is not running.
+
+## Stop, remove, and prune
+
+<Steps>
+  <Step title="Stop a running session">
+    `POST /session/stop` shuts the session down. It goes `offline` but its state, queue, and captured responses are kept.
+
+    ```bash
+    curl -X POST http://localhost:3333/session/stop \
+      -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"session": "worker"}'
+    ```
+  </Step>
+
+  <Step title="Remove an offline session's data">
+    `POST /session/remove` deletes an offline session's state, queue, and responses. It only works on offline sessions, so stop a session before removing it.
+
+    ```bash
+    curl -X POST http://localhost:3333/session/remove \
+      -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"session": "worker"}'
+    ```
+  </Step>
+
+  <Step title="Prune stale offline sessions in bulk">
+    `POST /sessions/prune` bulk-removes offline sessions whose last status change (`since`) is older than `HAIFLOW_SESSION_TTL_HOURS` (default `24`). Pass `olderThanHours` to override the cutoff for one call.
+
+    ```bash
+    curl -X POST http://localhost:3333/sessions/prune \
+      -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"olderThanHours": 48}'
+    ```
+
+    ```json
+    { "pruned": ["old-worker", "scratch"], "count": 2, "ttlHours": 48 }
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+`/session/remove` and `/sessions/prune` act on offline sessions only. A running session has to be stopped first, which keeps you from deleting an agent's state out from under it.
+</Warning>
+
+## CWD locking
+
+Two environment variables let an operator pin where sessions are allowed to run. This matters when haiflow is exposed beyond your own machine, so a caller cannot point an agent at an arbitrary directory.
+
+| Variable | Effect |
+| --- | --- |
+| `HAIFLOW_CWD` | Takes precedence: forces every session into one directory. A request `cwd` is then overridden, not rejected, and the response carries `cwdOverridden: true` when the requested value differed. |
+| `HAIFLOW_ALLOW_REQUEST_CWD` | When set to `false` (and no `HAIFLOW_CWD` is pinned), `/session/start` rejects every call with `400`, so the directory must be pinned server-side with `HAIFLOW_CWD`. |
+
+See [Configuration](/configuration) for the full list of session variables and their defaults, and [Security](/security) for when to lock the working directory down.
+
+## Sessions stay warm
+
+A session does not restart between tasks. Once started, it stays warm and reuses the same Claude Code agent across prompts, which keeps prior context available and avoids paying startup cost on every task. The exception is context filling up: when the agent's context window is exhausted, the session can no longer keep everything in memory.
+
+<Info>
+Long-running sessions need a context strategy. See [Context management](/concepts/context-management) for how haiflow keeps sessions productive as their context fills.
+</Info>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Queueing" icon="layer-group" href="/concepts/queueing">
+    How prompts line up behind a busy session and drain in order.
+  </Card>
+  <Card title="Context management" icon="brain" href="/concepts/context-management">
+    Keep warm sessions productive as their context window fills.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/guides/cli">
+    Start, inspect, and stop sessions from the command line.
+  </Card>
+  <Card title="Dashboard" icon="gauge" href="/guides/dashboard">
+    Watch every session's status and queue live in the browser.
+  </Card>
+</CardGroup>

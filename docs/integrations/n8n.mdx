@@ -1,0 +1,274 @@
+---
+title: n8n nodes
+description: "Trigger prompts, wait for responses, manage sessions, and receive pipeline events from inside n8n."
+icon: diagram-project
+---
+
+`n8n-nodes-haiflow` is an n8n community node for haiflow. From inside an n8n workflow you can trigger prompts, stream responses, manage sessions, publish pipeline events, and receive outbound pipeline webhooks. No glue code, no polling loops you maintain by hand.
+
+The package ships two nodes:
+
+<CardGroup cols={2}>
+  <Card title="Haiflow" icon="bolt">
+    An action node. Trigger prompts, wait for responses, manage sessions, and publish events.
+  </Card>
+  <Card title="Haiflow Pipeline Trigger" icon="webhook">
+    A trigger node. Starts a workflow when a pipeline topic publishes an event.
+  </Card>
+</CardGroup>
+
+## Install
+
+<Tabs>
+  <Tab title="Community Nodes (recommended)">
+    1. In n8n, open `Settings` > `Community Nodes` > `Install`.
+    2. Enter `n8n-nodes-haiflow`.
+    3. Agree to the community-node risks.
+    4. Click `Install`.
+  </Tab>
+  <Tab title="Manual">
+    Install the package and place it where your n8n loads custom nodes (for example `~/.n8n/custom`):
+
+    ```bash
+    npm i n8n-nodes-haiflow
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+  The nodes require an n8n instance that allows community nodes. See [Compatibility](#compatibility) below.
+</Info>
+
+## Credentials
+
+Both nodes authenticate with a single **Haiflow API** credential. Create one and fill in two fields:
+
+<ParamField path="Base URL" type="string" required>
+  The haiflow server URL without a trailing slash. Defaults to `http://localhost:3333`.
+</ParamField>
+
+<ParamField path="API Key" type="string" required>
+  Your `HAIFLOW_API_KEY`. It is sent as `Authorization: Bearer <key>` on every request.
+</ParamField>
+
+The credential test calls `GET /sessions`, so a successful test confirms both the Base URL and the API key are correct.
+
+<Note>
+  `HAIFLOW_API_KEY` is a secret you choose to protect your haiflow server. It is not a paid Anthropic key. See [Configuration](/configuration) and [Security](/security).
+</Note>
+
+## Haiflow node operations
+
+The Haiflow action node exposes one operation per haiflow endpoint. Pick the operation from the node's dropdown, then fill in its fields.
+
+### Trigger
+
+Sends a prompt to a session and returns immediately. Maps to `POST /trigger`.
+
+| Field | Required | Default | Description |
+| --- | --- | --- | --- |
+| Prompt | Yes | | The prompt text to send |
+| Session | No | `default` | Target session name |
+| Task ID | No | | Your own id for correlating the task |
+| Source | No | `n8n` | Label for where the trigger came from |
+
+The output depends on session state:
+
+<Tabs>
+  <Tab title="Idle">
+    The prompt is sent straight away.
+
+    ```json
+    { "id": "...", "session": "default", "sent": true, "prompt": "..." }
+    ```
+  </Tab>
+  <Tab title="Busy">
+    The session is working, so the prompt is queued.
+
+    ```json
+    { "id": "...", "session": "default", "queued": true, "position": 2 }
+    ```
+  </Tab>
+  <Tab title="Offline">
+    The session is not running. The endpoint returns `503` and the node raises an error. With **Continue On Fail** enabled, the node emits `{ "error": "..." }` instead so the workflow can branch on it.
+  </Tab>
+</Tabs>
+
+### Trigger and Wait
+
+The headline operation. It runs `POST /trigger`, then consumes the SSE stream until the task is complete and returns the full response in one node output. Use it when the next n8n step needs the agent's answer.
+
+It takes the same fields as Trigger, plus a timeout:
+
+| Field | Required | Default | Description |
+| --- | --- | --- | --- |
+| Prompt | Yes | | The prompt text to send |
+| Session | No | `default` | Target session name |
+| Task ID | No | | Your own id for correlating the task |
+| Source | No | `n8n` | Label for where the trigger came from |
+| Timeout (seconds) | No | `300` | Max wait. Capped at `600`. |
+
+On completion the node emits the joined response and the raw message list:
+
+```json
+{
+  "id": "...",
+  "session": "default",
+  "status": "complete",
+  "prompt": "...",
+  "response": "the messages joined into one string",
+  "messages": ["..."]
+}
+```
+
+`response` is the `messages` joined into a single string, which is convenient to pass straight to a downstream node such as Slack or Email.
+
+<AccordionGroup>
+  <Accordion title="If the work is queued">
+    When the prompt lands behind another task, the output also carries `{ "queued": true, "position": 1 }` so you can see where it sat in line.
+  </Accordion>
+  <Accordion title="If it times out">
+    The node returns `status: "timeout"` instead of `complete`. Raise the Timeout (up to `600`) for long-running prompts.
+  </Accordion>
+  <Accordion title="If it errors">
+    An error during the run is raised by the node. Enable **Continue On Fail** to handle it in the workflow rather than stopping the execution.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+  Trigger and Wait is the simplest way to make a synchronous request to Claude Code from n8n. For long jobs, prefer Trigger plus the Pipeline Trigger node so n8n is not holding an execution open. See [Fire and forget](/guides/fire-and-forget).
+</Tip>
+
+### Get Response
+
+Fetches the stored response for a task. Maps to `GET /responses/:id`.
+
+| Field | Required | Default | Description |
+| --- | --- | --- | --- |
+| Task ID | Yes | | The id returned by a Trigger operation |
+| Session | No | `default` | Session the task ran in |
+
+A finished task returns `200` with the full response. A task still running or queued returns `202`, so you can poll until it is ready.
+
+### Start Session
+
+Starts a detached Claude Code session. Maps to `POST /session/start`.
+
+| Field | Required | Description |
+| --- | --- | --- |
+| Session | Yes | Name for the session |
+| Working Directory | No | Absolute path the session runs in. Optional: when empty, the server falls back to `HAIFLOW_CWD` if pinned, otherwise `/tmp` |
+
+### Stop Session
+
+Stops a running session. Maps to `POST /session/stop`.
+
+| Field | Required | Description |
+| --- | --- | --- |
+| Session | Yes | The session to stop |
+
+### Publish Event
+
+Publishes a message to a pipeline topic so subscribed agents pick it up. Maps to `POST /publish`.
+
+| Field | Required | Description |
+| --- | --- | --- |
+| Topic | Yes | The topic to publish to |
+| Message | Yes | The payload delivered to subscribers |
+| Session | No | Source session name for the event |
+
+<Note>
+  Publish Event is how you inject work into a [pipeline](/guides/pipelines) from n8n. The `Message` you send reaches each subscriber's prompt template as `{{message}}`.
+</Note>
+
+### List Sessions
+
+Lists all sessions and their state. Maps to `GET /sessions`. Each item looks like:
+
+```json
+{ "session": "default", "status": "idle", "tmux": "..." }
+```
+
+## Haiflow Pipeline Trigger node
+
+The Pipeline Trigger node exposes a webhook that haiflow calls whenever a pipeline topic publishes an event. It is the inbound counterpart to Publish Event: instead of n8n pushing work into haiflow, haiflow pushes events into n8n.
+
+The POST payload haiflow sends is shaped like this:
+
+```json
+{
+  "topic": "deploy.finished",
+  "sourceSession": "default",
+  "taskId": "abc123",
+  "message": "Deploy completed",
+  "publishedAt": "2026-06-09T10:00:00.000Z"
+}
+```
+
+The node emits that payload as workflow data, so downstream nodes read `topic`, `message`, `taskId`, and the rest directly.
+
+<Steps>
+  <Step title="Add the node and activate the workflow">
+    Drop a Haiflow Pipeline Trigger node onto the canvas and activate the workflow. A live webhook URL exists only while the workflow is active.
+  </Step>
+  <Step title="Copy the Production webhook URL">
+    Copy the node's **Production** webhook URL.
+  </Step>
+  <Step title="Register the URL on the topic">
+    Add that URL to the target topic's `webhooks` array in your `pipeline.json`. See [Pipelines](/guides/pipelines) for the webhook fields.
+  </Step>
+  <Step title="Optionally set a shared secret">
+    Set a **Shared Secret** on the node so incoming requests must send a matching `X-Pipeline-Secret` header. Requests without it are rejected.
+  </Step>
+</Steps>
+
+<Warning>
+  A webhook URL is only reachable while the workflow is active. If events stop arriving, confirm the workflow is active and that the URL in `pipeline.json` matches the node's Production URL.
+</Warning>
+
+## Example: GitHub issue to Slack
+
+A complete, hands-off loop in three nodes. A GitHub issue comes in, Claude Code investigates it, and the result is posted to Slack with no manual steps.
+
+<Steps>
+  <Step title="Webhook node receives the issue">
+    A standard n8n Webhook node receives the GitHub issue payload.
+  </Step>
+  <Step title="Haiflow node investigates">
+    A Haiflow node set to **Trigger and Wait** runs a prompt against your project session, with **Timeout** set to `600`:
+
+    ```text
+    Investigate issue: {{ $json.body.issue.title }}, {{ $json.body.issue.body }}
+    ```
+  </Step>
+  <Step title="Slack node posts the answer">
+    A Slack node posts the joined response to a channel:
+
+    ```text
+    {{ $json.response }}
+    ```
+  </Step>
+</Steps>
+
+The output of Trigger and Wait exposes `response` as a plain string, which is why the Slack node can reference `{{ $json.response }}` directly.
+
+## Compatibility
+
+The nodes are built against the n8n community node API version `1` and require an n8n instance that allows community nodes. Self-hosted n8n allows them by default. On managed n8n, confirm community nodes are enabled before installing.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Pipelines" icon="diagram-project" href="/guides/pipelines">
+    How topics, emitters, subscribers, and outbound webhooks fit together.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    Full reference for the endpoints each node calls.
+  </Card>
+  <Card title="MCP integration" icon="plug" href="/integrations/mcp">
+    Drive haiflow from MCP-aware clients.
+  </Card>
+  <Card title="Fire and forget" icon="paper-plane" href="/guides/fire-and-forget">
+    Kick off long jobs without holding an n8n execution open.
+  </Card>
+</CardGroup>

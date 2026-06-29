@@ -1,0 +1,200 @@
+---
+title: Deployment
+description: "Expose haiflow to the internet safely with Cloudflare Zero Trust: an identity layer plus your API key."
+icon: globe
+---
+
+Run haiflow on your own machine and reach it from anywhere, without leaving the origin open to the public. This guide puts two independent layers in front of the server: Cloudflare Access for identity and your `HAIFLOW_API_KEY` for authorization.
+
+<Warning>
+**The golden rule: never expose the raw origin.** The identity layer only works if the public cannot reach haiflow's port directly. Otherwise an attacker who can reach the port skips Cloudflare Access entirely. Run haiflow in production mode so it binds to loopback (`127.0.0.1`) and only the local tunnel can forward to it.
+</Warning>
+
+## Prerequisites
+
+- A Cloudflare account (the free plan works)
+- A domain added to Cloudflare (even a cheap one works)
+- `cloudflared` installed: `brew install cloudflared`
+- haiflow running locally on port `3333`
+
+## Run haiflow in production mode
+
+Before you start a tunnel, harden the server. Set these in your `.env` (or environment) before launching haiflow:
+
+```bash
+HAIFLOW_ENV=production            # fail closed on insecure exposure
+HAIFLOW_API_KEY=$(openssl rand -hex 32)   # strong key (at least 24 chars, no placeholder)
+# HAIFLOW_HOST defaults to 127.0.0.1, leave it on loopback so only cloudflared reaches it
+```
+
+In production mode haiflow refuses to boot in two cases:
+
+- It would bind to a public interface (`0.0.0.0`, LAN, or a public IP) without `HAIFLOW_ALLOW_PUBLIC_BIND=true`.
+- The API key is weak or a placeholder.
+
+The tunnel below connects to `http://localhost:3333`, which works fine with the loopback bind.
+
+<Note>
+Only set `HAIFLOW_ALLOW_PUBLIC_BIND=true` if you are **not** using a local tunnel and instead firewall the port yourself and run your own identity layer in front. For the Cloudflare setup in this guide, leave it unset.
+</Note>
+
+See [Configuration](/configuration) for the full list of environment variables.
+
+## Set up the Cloudflare Tunnel
+
+<Steps>
+  <Step title="Authenticate cloudflared">
+    This opens a browser to authorize `cloudflared` with your Cloudflare account.
+
+    ```bash
+    cloudflared tunnel login
+    ```
+  </Step>
+
+  <Step title="Create a named tunnel">
+    ```bash
+    cloudflared tunnel create haiflow
+    ```
+
+    This generates a tunnel ID and a credentials file at `~/.cloudflared/<TUNNEL_ID>.json`. Note the tunnel ID, you will need it in the config file.
+  </Step>
+
+  <Step title="Create a DNS route">
+    Point a subdomain at your tunnel. This creates a CNAME record in Cloudflare DNS automatically.
+
+    ```bash
+    cloudflared tunnel route dns haiflow haiflow.yourdomain.com
+    ```
+  </Step>
+
+  <Step title="Configure the tunnel">
+    Create `~/.cloudflared/config.yml`. The ingress list maps your hostname to the loopback origin, with a catch-all `404` for anything else.
+
+    ```yaml
+    tunnel: <TUNNEL_ID>
+    credentials-file: /Users/<you>/.cloudflared/<TUNNEL_ID>.json
+
+    ingress:
+      - hostname: haiflow.yourdomain.com
+        service: http://localhost:3333
+      - service: http_status:404
+    ```
+  </Step>
+
+  <Step title="Add a Cloudflare Access policy">
+    This is the step that adds an identity check before requests ever reach your machine.
+
+    1. Open the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com).
+    2. Go to **Access > Applications > Add an application**.
+    3. Choose **Self-hosted**.
+    4. Set the **Application domain** to `haiflow.yourdomain.com`.
+    5. Add an **Allow** policy whose Include rule lists your email address.
+    6. Save the application.
+
+    Now anyone hitting `haiflow.yourdomain.com` must verify their email before the request is forwarded to your machine.
+  </Step>
+
+  <Step title="Start the tunnel">
+    ```bash
+    cloudflared tunnel run haiflow
+    ```
+
+    To keep it running across reboots, install it as a background service:
+
+    ```bash
+    sudo cloudflared service install
+    ```
+
+    The tunnel reconnects automatically after restarts.
+  </Step>
+</Steps>
+
+<Check>
+With production mode on and the tunnel live, your origin is bound to loopback, traffic is encrypted by Cloudflare, and every request must pass an identity check before it reaches haiflow.
+</Check>
+
+## Bypass for programmatic access
+
+Automated clients (n8n, cron jobs, inbound webhooks) cannot do an interactive email login. Give them a Cloudflare **Service Token** instead.
+
+<Steps>
+  <Step title="Create a service token">
+    1. Go to **Access > Service Auth > Create Service Token**.
+    2. Save the **Client ID** and **Client Secret**. They are shown only once.
+  </Step>
+
+  <Step title="Add a Service Auth policy">
+    Add a second policy to the haiflow application with action **Service Auth** and an Include rule that selects the token you just created.
+  </Step>
+
+  <Step title="Send both credentials">
+    Automated clients now send the Cloudflare service token **and** your haiflow API key on every request:
+
+    ```bash
+    curl -X POST https://haiflow.yourdomain.com/trigger \
+      -H "CF-Access-Client-Id: <CLIENT_ID>" \
+      -H "CF-Access-Client-Secret: <CLIENT_SECRET>" \
+      -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"prompt": "explain this codebase", "session": "worker"}'
+    ```
+  </Step>
+</Steps>
+
+The `CF-Access-*` headers satisfy Cloudflare Access, and the `Authorization` header satisfies haiflow. Both layers stay independent.
+
+## Security layers
+
+With this setup, an attacker needs every one of these to reach haiflow:
+
+| Layer | What it does | What is needed to bypass |
+| --- | --- | --- |
+| Loopback origin | In production, haiflow binds `127.0.0.1` only, so the port is unreachable except through the local tunnel | Shell access to your machine |
+| Cloudflare Access | Identity check before traffic reaches your machine | Your email OTP or a service token |
+| HTTPS (automatic) | Encrypts traffic end to end via Cloudflare | Nothing, it is always on |
+| `HAIFLOW_API_KEY` | Authorizes API requests, production enforces a strong key | The bearer token |
+| Localhost hooks | Restricts `/hooks/*` to local requests, rejecting any proxied request | Physical or shell access to your machine |
+
+<Tip>
+Stealing your `.env` alone is no longer enough. The attacker still has to pass the Cloudflare Access identity check, and cannot reach the origin directly because it is bound to loopback.
+</Tip>
+
+For the full threat model and the rules haiflow enforces, see [Security](/security).
+
+## Quick reference
+
+```bash
+# Check tunnel status
+cloudflared tunnel info haiflow
+
+# List tunnels
+cloudflared tunnel list
+
+# Delete a tunnel
+cloudflared tunnel delete haiflow
+
+# Run with verbose logs
+cloudflared tunnel run --loglevel debug haiflow
+```
+
+## Alternatives
+
+Cloudflare Tunnel plus Access is the recommended path, but it is not the only one.
+
+| Option | Pros | Cons |
+| --- | --- | --- |
+| **Cloudflare Tunnel + Access** (this guide) | Free, identity layer, auto-HTTPS | Requires a domain |
+| **Tailscale Funnel** | No domain needed, mesh VPN | Only your Tailscale network can reach it |
+| **ngrok + IP restrictions** | Quick setup | Paid for static domains, no identity layer |
+| **VPS + Caddy + firewall** | Full control, always on | More setup, manage Claude Code auth remotely |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Security" icon="shield-halved" href="/security">
+    The full threat model and the guardrails haiflow enforces.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration">
+    Every environment variable, including the production-mode flags.
+  </Card>
+</CardGroup>

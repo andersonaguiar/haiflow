@@ -1,0 +1,1266 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "haiflow API",
+    "version": "0.1.0",
+    "description": "HTTP orchestrator for Claude Code. Start Claude Code sessions in tmux, trigger prompts, queue work, stream and capture responses, fan out across worker pools, and chain agents with pub/sub.\n\nEvery endpoint except `GET /health`, `GET /version`, the `POST /hooks/*` callbacks, and `POST /ingest/{source}` requires an `Authorization: Bearer <HAIFLOW_API_KEY>` header. `HAIFLOW_API_KEY` is a secret you define, not an Anthropic/Claude paid key.",
+    "license": {
+      "name": "MIT",
+      "url": "https://github.com/andersonaguiar/haiflow/blob/main/LICENSE"
+    },
+    "contact": {
+      "name": "haiflow on GitHub",
+      "url": "https://github.com/andersonaguiar/haiflow"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3333",
+      "description": "Local server (default)"
+    },
+    {
+      "url": "https://haiflow.yourdomain.com",
+      "description": "Behind a Cloudflare Tunnel / reverse proxy (see Deployment)"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    { "name": "Sessions", "description": "Start, stop, list, inspect, and steer Claude Code tmux sessions." },
+    { "name": "Triggers", "description": "Send prompts to a session, sent immediately when idle, auto-queued when busy." },
+    { "name": "Responses", "description": "Fetch, stream, and clear task responses and tool/diff timelines." },
+    { "name": "Queue", "description": "Inspect and manage a session's pending prompt queue." },
+    { "name": "Tasks", "description": "The durable task ledger: what each task ran, changed, spent, and how long it took." },
+    { "name": "Usage & Savings", "description": "Measured token consumption and the equivalent API cost avoided." },
+    { "name": "Pools & Map-Reduce", "description": "Load-balance and fan work across a pool of member sessions, then reduce." },
+    { "name": "Pipeline", "description": "Event-driven agent chains over pub/sub topics." },
+    { "name": "Webhooks", "description": "Signed inbound webhook gateway: drive tasks from a SaaS webhook without sharing your bearer key." },
+    { "name": "System", "description": "Health, version, and diagnostics." }
+  ],
+  "paths": {
+    "/session/start": {
+      "post": {
+        "tags": ["Sessions"],
+        "summary": "Start a session",
+        "operationId": "startSession",
+        "description": "Start a Claude Code session in a detached tmux session. Blocks until the SessionStart hook links a Claude session id (so responses can be captured), or fails with `409` once `HAIFLOW_START_READY_TIMEOUT_MS` elapses, almost always because the Claude Code hooks are not wired (`haiflow setup`).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cwd": { "type": "string", "description": "Working directory for Claude. **Optional.** Precedence: if `HAIFLOW_CWD` is pinned it is forced (a different requested `cwd` is overridden, not rejected, and the response carries `cwdOverridden: true`). Otherwise, when `HAIFLOW_ALLOW_REQUEST_CWD=false`, every start is rejected with `400` (pin `HAIFLOW_CWD` instead). When neither applies and `cwd` is omitted, haiflow falls back to `/tmp` and the response includes `cwdDefaulted: true`.", "example": "/path/to/project" },
+                  "session": { "type": "string", "description": "Session name.", "default": "default", "example": "worker" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "started": { "type": "boolean", "example": true },
+                    "session": { "type": "string", "example": "worker" },
+                    "tmux": { "type": "string", "example": "worker" },
+                    "cwd": { "type": "string", "example": "/path/to/project" },
+                    "ready": { "type": "boolean", "description": "`false` when the session linked but TUI readiness could not be confirmed in time (still usable).", "example": true },
+                    "cwdOverridden": { "type": "boolean", "description": "Present and `true` when the server has a forced `HAIFLOW_CWD` differing from the requested `cwd`." },
+                    "cwdDefaulted": { "type": "boolean", "description": "Present and `true` when `cwd` was omitted (and no `HAIFLOW_CWD` is pinned) so the server fell back to `/tmp`." }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`HAIFLOW_ALLOW_REQUEST_CWD=false` with no `HAIFLOW_CWD` pinned: every `/session/start` is rejected (set `HAIFLOW_CWD` on the server instead).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": {
+            "description": "The session never linked a Claude session id (hooks likely not wired). The dead pane is torn down.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "...hooks are likely not wired (run `haiflow setup`)", "session": "worker" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/stop": {
+      "post": {
+        "tags": ["Sessions"],
+        "summary": "Stop a session",
+        "operationId": "stopSession",
+        "description": "Kill a Claude tmux session.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "session": { "type": "string", "default": "default", "example": "worker" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "stopped": { "type": "boolean", "example": true },
+                    "session": { "type": "string", "example": "worker" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid or empty JSON body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Session is not running.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/session/remove": {
+      "post": {
+        "tags": ["Sessions"],
+        "summary": "Remove an offline session's data",
+        "operationId": "removeSession",
+        "description": "Remove an offline session's state, queue, and responses. Only works on offline sessions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "session": { "type": "string", "example": "worker" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Session data removed." },
+          "400": { "description": "Invalid body or missing `session`." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "description": "Session is not offline." }
+        }
+      }
+    },
+    "/sessions/prune": {
+      "post": {
+        "tags": ["Sessions"],
+        "summary": "Prune stale offline sessions",
+        "operationId": "pruneSessions",
+        "description": "Bulk-remove offline sessions whose last status change (`since`) is older than a TTL (default `HAIFLOW_SESSION_TTL_HOURS`, 24h). Idle/busy and recently-offline sessions are kept.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "olderThanHours": { "type": "number", "description": "Override the TTL for this call.", "example": 48 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Prune result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pruned": { "type": "array", "items": { "type": "string" } },
+                    "count": { "type": "integer", "example": 2 },
+                    "ttlHours": { "type": "number", "example": 24 }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/interrupt": {
+      "post": {
+        "tags": ["Sessions"],
+        "summary": "Interrupt or steer a running session",
+        "operationId": "interruptSession",
+        "description": "Send a control key into a running session's TUI, optionally followed by a steering prompt. Use it to unstick a session wedged on a permission prompt, or to redirect a running agent.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "session": { "type": "string", "default": "default", "example": "worker" },
+                  "mode": { "type": "string", "enum": ["escape", "ctrl-c"], "default": "escape", "description": "`escape` cancels the current generation/tool without exiting; `ctrl-c` is harsher." },
+                  "prompt": { "type": "string", "description": "A steering prompt typed in after the interrupt settles. Passes the same structural checks as `/trigger`.", "example": "stop and run the tests instead" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Interrupt sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "interrupted": { "type": "boolean", "example": true },
+                    "session": { "type": "string", "example": "worker" },
+                    "mode": { "type": "string", "example": "escape" },
+                    "steered": { "type": "boolean", "example": true }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid body, or the steering `prompt` was rejected by structural checks." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Session is not running." },
+          "413": { "description": "Steering `prompt` exceeds the 512KB limit." },
+          "500": { "description": "Failed to send the interrupt to the session." }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "tags": ["Sessions"],
+        "summary": "Get one session's status",
+        "operationId": "getStatus",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": { "type": "string", "example": "worker" },
+                    "status": { "type": "string", "enum": ["idle", "busy", "offline"], "example": "idle" },
+                    "since": { "type": "string", "format": "date-time" },
+                    "queueLength": { "type": "integer", "example": 0 },
+                    "currentPrompt": { "type": "string" },
+                    "waiting": { "type": "boolean", "description": "Present and `true` when the session is blocked needing input; `status` stays `busy`." },
+                    "waitingMessage": { "type": "string" },
+                    "waitingSince": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/sessions": {
+      "get": {
+        "tags": ["Sessions"],
+        "summary": "List all sessions",
+        "operationId": "listSessions",
+        "responses": {
+          "200": {
+            "description": "All sessions and their status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "session": { "type": "string", "example": "worker" },
+                      "status": { "type": "string", "example": "idle" },
+                      "tmux": { "type": "string", "example": "worker" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/trigger": {
+      "post": {
+        "tags": ["Triggers"],
+        "summary": "Trigger a prompt",
+        "operationId": "trigger",
+        "description": "Send a prompt to Claude. If Claude is busy, the prompt is auto-queued and sent when idle. Supports scheduling, dedup, priority, and fire-and-forget (`ephemeral` + `callbackUrl`).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                  "prompt": { "type": "string", "description": "The prompt or slash command to send.", "example": "summarize recent commits" },
+                  "session": { "type": "string", "default": "default", "example": "worker" },
+                  "id": { "type": "string", "description": "Custom task id (auto-generated if omitted).", "example": "task-001" },
+                  "source": { "type": "string", "description": "Label for where the trigger came from.", "example": "cron" },
+                  "priority": { "type": "number", "description": "Higher drains first; ties break FIFO.", "default": 0 },
+                  "dedupKey": { "type": "string", "description": "A second enqueue with the same key (while one is running or queued) is dropped." },
+                  "delaySeconds": { "type": "number", "description": "Schedule the task for later. The drain picks it up once due, even on an idle session." },
+                  "notBefore": { "type": "string", "format": "date-time", "description": "ISO timestamp form of `delaySeconds` (takes precedence if both given)." },
+                  "ephemeral": { "type": "boolean", "description": "Fire-and-forget: auto-start an offline session (needs `cwd`), then stop it once this task responds (only if nothing else is queued)." },
+                  "cwd": { "type": "string", "description": "Working directory used only when `ephemeral` auto-starts an offline session." },
+                  "callbackUrl": { "type": "string", "format": "uri", "description": "POST the result here on completion. Off unless `HAIFLOW_ALLOW_TRIGGER_CALLBACK=true`.", "example": "https://my-app.example.com/haiflow-done" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Prompt sent immediately (idle) or queued (busy/scheduled).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "title": "Sent",
+                      "properties": {
+                        "id": { "type": "string", "example": "task-001" },
+                        "session": { "type": "string", "example": "worker" },
+                        "sent": { "type": "boolean", "example": true },
+                        "prompt": { "type": "string" },
+                        "autoStarted": { "type": "boolean" },
+                        "ephemeral": { "type": "boolean" },
+                        "callbackScheduled": { "type": "boolean" }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "title": "Queued",
+                      "properties": {
+                        "id": { "type": "string", "example": "task-001" },
+                        "session": { "type": "string", "example": "worker" },
+                        "queued": { "type": "boolean", "example": true },
+                        "position": { "type": "integer", "example": 1 },
+                        "message": { "type": "string" },
+                        "notBefore": { "type": "string", "format": "date-time", "description": "Present when the task was scheduled for later." }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "title": "Deduped",
+                      "properties": {
+                        "id": { "type": "string", "example": "task-001" },
+                        "session": { "type": "string", "example": "worker" },
+                        "deduped": { "type": "boolean", "example": true },
+                        "message": { "type": "string" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid request (e.g. `ephemeral` with no resolvable `cwd`, or a `callbackUrl` that is disabled or off the allowlist)." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "413": { "description": "`prompt` exceeds the 512KB (`MAX_PROMPT_SIZE`) limit." },
+          "500": { "description": "Failed to send the prompt to the tmux session." },
+          "503": { "description": "Session is offline (and `ephemeral` did not auto-start it)." }
+        }
+      }
+    },
+    "/queue": {
+      "get": {
+        "tags": ["Queue"],
+        "summary": "View the queue",
+        "operationId": "getQueue",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": { "description": "Queued prompts for the session." },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "delete": {
+        "tags": ["Queue"],
+        "summary": "Clear the queue",
+        "operationId": "clearQueue",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": { "description": "Queue cleared." },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/queue/{id}": {
+      "post": {
+        "tags": ["Queue"],
+        "summary": "Re-prioritise a queued item",
+        "operationId": "reprioritizeQueueItem",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "task-001" },
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["priority"],
+                "properties": { "priority": { "type": "number", "example": 9 } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Re-prioritised." },
+          "400": { "description": "`priority` (number) is required." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "The id is not queued." }
+        }
+      },
+      "delete": {
+        "tags": ["Queue"],
+        "summary": "Remove a single queued item",
+        "operationId": "removeQueueItem",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "task-001" },
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": { "description": "Item removed." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "The id is not queued." }
+        }
+      }
+    },
+    "/responses/{id}": {
+      "get": {
+        "tags": ["Responses"],
+        "summary": "Get a task response",
+        "operationId": "getResponse",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "task-001" },
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task complete.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ResponseObject" }
+              }
+            }
+          },
+          "202": {
+            "description": "Still in progress.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "string", "example": "task-001" },
+                    "session": { "type": "string", "example": "worker" },
+                    "status": { "type": "string", "enum": ["pending", "queued"] }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Unknown task id." }
+        }
+      }
+    },
+    "/responses/{id}/stream": {
+      "get": {
+        "tags": ["Responses"],
+        "summary": "Stream a response (SSE)",
+        "operationId": "streamResponse",
+        "description": "Stream response status via Server-Sent Events. Opens a persistent connection that emits `status`, then a terminal `complete` / `error` / `timeout` event. Pass the **same** `session` you triggered on.\n\nEvent stream (text/event-stream):\n- `status`: `{\"id\":\"...\",\"status\":\"pending\"}` or `{\"status\":\"queued\",\"position\":2}`\n- `complete`: the full response object (same shape as `GET /responses/{id}`)\n- `error`: `{\"error\":\"Session is offline\"}`\n- `timeout`: emitted when the timeout is reached",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "task-001" },
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "description": "Session that owns the task. Omitting it silently streams the `default` session.", "example": "worker" },
+          { "name": "timeout", "in": "query", "schema": { "type": "integer", "default": 300, "maximum": 600 }, "description": "Max seconds to wait (capped at 600)." }
+        ],
+        "responses": {
+          "200": {
+            "description": "An SSE stream (`text/event-stream`).",
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" },
+                "example": "event: status\ndata: {\"id\":\"task-001\",\"status\":\"pending\"}\n\nevent: complete\ndata: {\"id\":\"task-001\",\"completed_at\":\"2026-06-28T10:00:00Z\",\"messages\":[\"...\"]}\n\n"
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/responses/{id}/timeline": {
+      "get": {
+        "tags": ["Responses"],
+        "summary": "Get a task's tool/diff timeline",
+        "operationId": "getTimeline",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "task-001" },
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tool/command/diff timeline for the task.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "string", "example": "task-001" },
+                    "session": { "type": "string", "example": "worker" },
+                    "status": { "type": "string" },
+                    "steps": { "type": "array", "items": { "$ref": "#/components/schemas/TaskStep" } },
+                    "durationMs": { "type": "integer" },
+                    "usage": { "$ref": "#/components/schemas/Usage" },
+                    "model": { "type": "string" },
+                    "savedUsd": { "type": "number" },
+                    "filesChanged": { "type": "array", "items": { "type": "string" } },
+                    "commandsRun": { "type": "array", "items": { "type": "string" } }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Unknown task id." }
+        }
+      }
+    },
+    "/responses": {
+      "get": {
+        "tags": ["Responses"],
+        "summary": "List response IDs",
+        "operationId": "listResponses",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Completed response IDs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": { "type": "string", "example": "worker" },
+                    "length": { "type": "integer", "example": 5 },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string" },
+                          "completed_at": { "type": "string", "format": "date-time" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "delete": {
+        "tags": ["Responses"],
+        "summary": "Clear saved responses",
+        "operationId": "clearResponses",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Responses cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": { "type": "string", "example": "worker" },
+                    "cleared": { "type": "boolean", "example": true },
+                    "count": { "type": "integer", "example": 5 }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/tasks": {
+      "get": {
+        "tags": ["Tasks"],
+        "summary": "List recorded tasks",
+        "operationId": "listTasks",
+        "description": "List tasks from the durable SQLite ledger, newest first. Each task records the ordered tool calls, commands run, files changed, real diffs, token usage, model, timing, and estimated savings.",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string" }, "description": "Filter by session.", "example": "worker" },
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["running", "completed", "timed_out", "cancelled", "failed"] } },
+          { "name": "source", "in": "query", "schema": { "type": "string" }, "description": "Filter by trigger source (`trigger`, `queue`, `pipeline:<topic>`, ...)." },
+          { "name": "since", "in": "query", "schema": { "type": "string", "format": "date-time" }, "description": "Lower bound on `started_at`." },
+          { "name": "until", "in": "query", "schema": { "type": "string", "format": "date-time" }, "description": "Upper bound on `started_at`." },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "maximum": 500, "default": 50 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recorded tasks.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } },
+                    "total": { "type": "integer", "example": 88 }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/tasks/{id}": {
+      "get": {
+        "tags": ["Tasks"],
+        "summary": "Get one task",
+        "operationId": "getTask",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "task-001" },
+          { "name": "session", "in": "query", "schema": { "type": "string" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task detail, including the saved response `messages` when available.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Task" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Unknown task id." }
+        }
+      }
+    },
+    "/tasks/{id}/cancel": {
+      "post": {
+        "tags": ["Tasks"],
+        "summary": "Cancel a single task",
+        "operationId": "cancelTask",
+        "description": "Cancel a single task without killing the warm session or clearing the whole queue. If it is the running task, sends Escape and drains the next queued prompt; if it is queued, removes just that item.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "task-001" },
+          { "name": "session", "in": "query", "schema": { "type": "string", "default": "default" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task cancelled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "cancelled": { "type": "boolean", "example": true },
+                    "session": { "type": "string", "example": "worker" },
+                    "id": { "type": "string", "example": "task-001" },
+                    "where": { "type": "string", "enum": ["running", "queue"], "example": "running" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "The id is neither running nor queued for that session." }
+        }
+      }
+    },
+    "/usage": {
+      "get": {
+        "tags": ["Usage & Savings"],
+        "summary": "Aggregate usage and savings",
+        "operationId": "getUsage",
+        "description": "Aggregate token usage and the equivalent API cost avoided since a timestamp (default: last 24h).",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string" }, "example": "worker" },
+          { "name": "since", "in": "query", "schema": { "type": "string", "format": "date-time" }, "example": "2026-06-09T00:00:00Z" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage totals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "since": { "type": "string", "format": "date-time" },
+                    "session": { "type": "string" },
+                    "tasks": { "type": "integer" },
+                    "totalTokens": { "type": "integer" },
+                    "inputTokens": { "type": "integer" },
+                    "outputTokens": { "type": "integer" },
+                    "cacheCreationTokens": { "type": "integer" },
+                    "cacheReadTokens": { "type": "integer" },
+                    "savedUsd": { "type": "number", "example": 14.1 }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/usage/window": {
+      "get": {
+        "tags": ["Usage & Savings"],
+        "summary": "Rolling 5h / 7d usage windows",
+        "operationId": "getUsageWindow",
+        "description": "Rolling 5-hour and 7-day windows (the subscription rate-limit windows), for the whole account or one `session`. When `HAIFLOW_USAGE_ALERT_TOKENS` is set, `alert` is `true` once the 5h window crosses it (alert-only, never throttles).",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string" }, "description": "Omit for the whole account.", "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Window totals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": { "type": "string", "example": "all" },
+                    "windows": {
+                      "type": "object",
+                      "properties": {
+                        "5h": { "$ref": "#/components/schemas/UsageWindowBucket" },
+                        "7d": { "$ref": "#/components/schemas/UsageWindowBucket" }
+                      }
+                    },
+                    "alertThresholdTokens": { "type": ["integer", "null"] },
+                    "alert": { "type": "boolean", "example": false }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/pool/{name}/trigger": {
+      "post": {
+        "tags": ["Pools & Map-Reduce"],
+        "summary": "Load-balance a prompt across a pool",
+        "operationId": "poolTrigger",
+        "description": "Send one prompt to a pool defined in `pipeline.json`. It goes to an idle member, or the least-loaded member's queue.",
+        "parameters": [
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" }, "example": "reviewers" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                  "prompt": { "type": "string", "example": "review the latest diff" },
+                  "id": { "type": "string", "description": "Custom task id (auto-generated if omitted)." },
+                  "source": { "type": "string", "description": "Trigger source label (defaults to `pool:<name>`)." },
+                  "priority": { "type": "number", "description": "Queue priority if the prompt is queued behind a member's work." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dispatched to a member.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pool": { "type": "string", "example": "reviewers" },
+                    "member": { "type": "string", "example": "reviewer-2" },
+                    "id": { "type": "string", "example": "task_..." },
+                    "where": { "type": "string", "enum": ["sent", "queued", "queued_offline"], "example": "sent" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "`prompt` is required or was rejected by structural checks." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Unknown pool." },
+          "413": { "description": "`prompt` exceeds the 512KB limit." }
+        }
+      }
+    },
+    "/map": {
+      "post": {
+        "tags": ["Pools & Map-Reduce"],
+        "summary": "Map items across a pool, then reduce",
+        "operationId": "map",
+        "description": "Fan a list of items across a pool in parallel, then fire a reducer once every item has come back (the fan-in / JOIN). If a shard never returns, the reducer fires with partial results after `HAIFLOW_MAP_TIMEOUT_SEC` (default 1800).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["items", "pool", "mapTemplate"],
+                "properties": {
+                  "items": { "type": "array", "items": {}, "description": "Items to map over (strings, or objects stringified into `{{item}}`). Capped at `HAIFLOW_MAP_MAX_ITEMS` (200).", "example": ["src/a.ts", "src/b.ts", "src/c.ts"] },
+                  "pool": { "type": "string", "description": "Pool name from `pipeline.json`.", "example": "reviewers" },
+                  "mapTemplate": { "type": "string", "description": "Prompt per item. Vars: `{{item}}`, `{{index}}`, `{{total}}`, `{{runId}}`.", "example": "Review {{item}} and list any bugs." },
+                  "reduce": {
+                    "type": "object",
+                    "description": "Optional reducer fired once all items return. The promptTemplate supports `{{results}}` (joined outputs), `{{total}}`, `{{pool}}`, and `{{runId}}`.",
+                    "properties": {
+                      "session": { "type": "string", "example": "lead" },
+                      "promptTemplate": { "type": "string", "example": "Merge these reviews into one report:\n{{results}}" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Map run started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "runId": { "type": "string", "example": "map_..." },
+                    "pool": { "type": "string", "example": "reviewers" },
+                    "total": { "type": "integer", "example": 3 },
+                    "reduce": { "type": "boolean" },
+                    "dispatched": { "type": "array", "items": { "type": "object" } }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid request: invalid JSON, empty `items`, or missing `mapTemplate`." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Unknown pool." },
+          "413": { "description": "`items` exceeds `HAIFLOW_MAP_MAX_ITEMS` (default 200)." }
+        }
+      }
+    },
+    "/map/{runId}": {
+      "get": {
+        "tags": ["Pools & Map-Reduce"],
+        "summary": "Get map run progress",
+        "operationId": "getMapRun",
+        "parameters": [
+          { "name": "runId", "in": "path", "required": true, "schema": { "type": "string" }, "example": "map_..." }
+        ],
+        "responses": {
+          "200": {
+            "description": "Progress of the map run.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "runId": { "type": "string" },
+                    "pool": { "type": "string" },
+                    "total": { "type": "integer" },
+                    "collected": { "type": "integer" },
+                    "reduced": { "type": "boolean" },
+                    "reduceTaskId": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Unknown run id." }
+        }
+      }
+    },
+    "/pipeline": {
+      "get": {
+        "tags": ["Pipeline"],
+        "summary": "Get pipeline configuration",
+        "operationId": "getPipeline",
+        "description": "Get the current pipeline configuration, Redis status, and recent events.",
+        "responses": {
+          "200": {
+            "description": "Pipeline state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topics": { "type": "object", "additionalProperties": true },
+                    "emitters": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+                    "pools": { "type": "object", "additionalProperties": true },
+                    "redis": { "type": "boolean", "example": true },
+                    "recentEvents": { "type": "array", "items": { "$ref": "#/components/schemas/PipelineEvent" } }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/pipeline/topics": {
+      "get": {
+        "tags": ["Pipeline"],
+        "summary": "List topic names",
+        "operationId": "listTopics",
+        "responses": {
+          "200": {
+            "description": "Configured topic names.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "type": "string" }, "example": ["design.ready", "code.ready", "review.done"] }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/publish": {
+      "post": {
+        "tags": ["Pipeline"],
+        "summary": "Publish a pipeline event",
+        "operationId": "publish",
+        "description": "Publish an event to a pipeline topic. Useful for external systems (n8n, scripts) to inject work into the pipeline. The source session is recorded as `external`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["topic", "message"],
+                "properties": {
+                  "topic": { "type": "string", "description": "Topic name to publish to.", "example": "design.ready" },
+                  "message": { "type": "string", "description": "Passed to subscriber prompt templates as `{{message}}`.", "example": "New design for the login page: ..." },
+                  "session": { "type": "string", "default": "external", "description": "Source session name." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Event published. An unknown topic is a silent no-op (still 200)." },
+          "400": { "description": "Invalid body, missing `topic`/`message`, or the message was rejected by structural checks." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "413": { "description": "`message` exceeds the 512KB limit." }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "tags": ["Pipeline"],
+        "summary": "List recent pipeline events",
+        "operationId": "listEvents",
+        "description": "Recent pipeline events with their full per-subscriber delivery records. Distinct from `GET /pipeline`, which embeds only the 10 most recent events in summarized form.",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50, "maximum": 200 }, "description": "Max events to return (default 50, capped at 200)." }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "topic": { "type": "string", "example": "design.ready" },
+                          "sourceSession": { "type": "string", "example": "design-agent" },
+                          "taskId": { "type": "string" },
+                          "message": { "type": "string" },
+                          "publishedAt": { "type": "string", "format": "date-time" },
+                          "deliveries": { "type": "array", "items": { "type": "object" }, "description": "Per-subscriber delivery records." }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/ingest/{source}": {
+      "post": {
+        "tags": ["Webhooks"],
+        "summary": "Signed inbound webhook",
+        "operationId": "ingest",
+        "description": "Drive a Claude task (or publish an event) directly from a SaaS webhook. **Not** bearer-authenticated. Authenticity is a per-source HMAC signature over the raw body, with one-use replay protection. Configure recipes in `ingest.json`. Every payload field is wrapped in a `BEGIN/END WEBHOOK DATA` frame as untrusted input.",
+        "security": [],
+        "parameters": [
+          { "name": "source", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Recipe name from `ingest.json`.", "example": "github" },
+          { "name": "X-Hub-Signature-256", "in": "header", "schema": { "type": "string" }, "description": "Signature for the `github` scheme." },
+          { "name": "Stripe-Signature", "in": "header", "schema": { "type": "string" }, "description": "Signature for the `stripe` scheme (timestamped)." },
+          { "name": "X-Haiflow-Signature", "in": "header", "schema": { "type": "string" }, "description": "Signature for the generic `hmac-sha256` scheme." },
+          { "name": "X-Haiflow-Timestamp", "in": "header", "schema": { "type": "string" }, "description": "Optional timestamp for the `hmac-sha256` scheme. When present it is enforced for freshness and signed as `${ts}.${rawBody}`." }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "The raw provider payload. The signature is verified over the raw bytes, so do not re-serialize before forwarding.",
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": true }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Accepted: triggered or published per the recipe." },
+          "400": { "description": "Rejected by structural prompt checks, or a `publish` recipe is missing its `topic`." },
+          "401": { "description": "Signature verification failed." },
+          "404": { "description": "Unknown ingest source (no matching recipe in `ingest.json`)." },
+          "409": { "description": "Replay detected (one-time nonce already seen)." },
+          "413": { "description": "Raw payload or rendered prompt exceeds `MAX_PROMPT_SIZE` (512KB)." },
+          "429": { "description": "Per-source rate limit exceeded.", "headers": { "Retry-After": { "schema": { "type": "integer" } } } },
+          "503": { "description": "Redis unavailable and the gateway fails closed (unless `HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS=true`)." }
+        }
+      }
+    },
+    "/doctor": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Diagnose session health",
+        "operationId": "doctor",
+        "description": "Catches the #1 silent failure: a tmux session whose hooks were never wired (so the Stop hook never fires and the session sits busy forever). The tell is `tmuxRunning: true` with `hooksLinked: false`. With no `session`, returns reports for all sessions.",
+        "parameters": [
+          { "name": "session", "in": "query", "schema": { "type": "string" }, "example": "worker" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Health report(s).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/DoctorReport" },
+                    {
+                      "type": "object",
+                      "properties": { "sessions": { "type": "array", "items": { "$ref": "#/components/schemas/DoctorReport" } } }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Health check",
+        "operationId": "health",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Server is up.",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Get running version",
+        "operationId": "version",
+        "security": [],
+        "description": "Unauthenticated. Returns the running build so operators can confirm which version a remote haiflow is on.",
+        "responses": {
+          "200": {
+            "description": "Build info.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "version": { "type": "string", "example": "0.1.0" },
+                    "startedAt": { "type": "string", "format": "date-time" },
+                    "redis": { "type": "boolean", "example": true }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Your `HAIFLOW_API_KEY`, compared in constant time. This is the root credential: anyone holding it can run code in your sessions."
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid bearer token.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "unauthorized" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" },
+          "session": { "type": "string" }
+        }
+      },
+      "ResponseObject": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "task-001" },
+          "completed_at": { "type": "string", "format": "date-time", "example": "2026-06-28T02:35:09Z" },
+          "prompt": { "type": "string" },
+          "messages": { "type": "array", "items": { "type": "string" }, "example": ["Here's a summary of recent commits..."] }
+        }
+      },
+      "Usage": {
+        "type": "object",
+        "properties": {
+          "totalTokens": { "type": "integer", "example": 1234 },
+          "inputTokens": { "type": "integer", "example": 1000 },
+          "outputTokens": { "type": "integer", "example": 234 },
+          "cacheCreationTokens": { "type": "integer", "example": 0 },
+          "cacheReadTokens": { "type": "integer", "example": 0 }
+        }
+      },
+      "UsageWindowBucket": {
+        "type": "object",
+        "properties": {
+          "tasks": { "type": "integer", "example": 3 },
+          "totalTokens": { "type": "integer", "example": 41000 },
+          "inputTokens": { "type": "integer", "example": 30000 },
+          "outputTokens": { "type": "integer", "example": 9000 },
+          "cacheCreationTokens": { "type": "integer", "example": 1000 },
+          "cacheReadTokens": { "type": "integer", "example": 1000 },
+          "savedUsd": { "type": "number", "example": 0.42 }
+        }
+      },
+      "TaskStep": {
+        "type": "object",
+        "properties": {
+          "seq": { "type": "integer", "description": "Ordinal position of the step in the task.", "example": 0 },
+          "tool": { "type": "string", "example": "Edit" },
+          "summary": { "type": "string" },
+          "isError": { "type": "boolean" },
+          "detail": { "type": "string", "description": "Tool detail; for Edit/Write/MultiEdit this is the mini-diff." },
+          "filePath": { "type": "string" }
+        }
+      },
+      "Task": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "task-001" },
+          "session": { "type": "string", "example": "worker" },
+          "status": { "type": "string", "enum": ["running", "completed", "timed_out", "cancelled", "failed"] },
+          "source": { "type": "string", "example": "trigger" },
+          "prompt": { "type": "string", "description": "The prompt that started the task." },
+          "started_at": { "type": "string", "format": "date-time" },
+          "finished_at": { "type": ["string", "null"], "format": "date-time" },
+          "duration_ms": { "type": "integer", "example": 8200 },
+          "model": { "type": "string", "example": "claude-..." },
+          "usage": { "$ref": "#/components/schemas/Usage" },
+          "steps": { "type": "array", "items": { "$ref": "#/components/schemas/TaskStep" } },
+          "files_changed": { "type": "array", "items": { "type": "string" } },
+          "commands_run": { "type": "array", "items": { "type": "string" } },
+          "saved_usd": { "type": "number", "example": 0.12 },
+          "chain": { "type": ["string", "null"], "description": "Pipeline chain id when the task was driven by a pipeline event." },
+          "error": { "type": ["string", "null"], "description": "Error detail when the task failed or timed out." },
+          "messages": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "PipelineEvent": {
+        "type": "object",
+        "properties": {
+          "topic": { "type": "string", "example": "design.ready" },
+          "sourceSession": { "type": "string", "example": "design-agent" },
+          "taskId": { "type": "string", "example": "task_1234_abc" },
+          "subscribers": { "type": "array", "items": { "type": "string" }, "example": ["developer"] },
+          "publishedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "DoctorReport": {
+        "type": "object",
+        "properties": {
+          "session": { "type": "string", "example": "worker" },
+          "status": { "type": "string", "example": "idle" },
+          "since": { "type": "string", "format": "date-time" },
+          "cwd": { "type": "string", "example": "/path/to/project" },
+          "queueLength": { "type": "integer", "example": 0 },
+          "tmuxRunning": { "type": "boolean", "example": true },
+          "hooksLinked": { "type": "boolean", "example": true },
+          "healthy": { "type": "boolean", "example": true },
+          "note": { "type": "string", "description": "Present when something is wrong." }
+        }
+      }
+    }
+  }
+}

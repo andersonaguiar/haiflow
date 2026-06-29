@@ -1,0 +1,239 @@
+---
+title: Worker pools & map-reduce
+description: "Load-balance and fan work across a pool of member sessions, then reduce to one result."
+icon: layer-group
+---
+
+A pool is a set of member sessions that share work. Instead of pushing every prompt at one agent, you spread it across several, so independent items run side by side. You can send a single prompt to whichever member is free, or fan a whole list of items across the pool in parallel and converge the outputs into one result.
+
+Because every member runs on the same flat Claude Code subscription, mapping many items across a pool costs nothing extra per token. The only ceiling is how many members you define.
+
+## Define a pool
+
+Pools live in `pipeline.json` under a top level `pools` key. Each pool names its `members`, and every member is a session name.
+
+```json
+{
+  "pools": {
+    "reviewers": {
+      "members": ["reviewer-1", "reviewer-2", "reviewer-3"]
+    }
+  }
+}
+```
+
+Each member is its own tmux session, started with its own cwd. A pool's max concurrency is its member count: the `reviewers` pool above can run three items at once.
+
+<Warning>
+  Members are not created for you. Start each member as a session before you trigger the pool, the same way you start any other session. See [Sessions](/concepts/sessions) for how to start one with its own cwd.
+</Warning>
+
+## Load-balance one prompt
+
+`POST /pool/:name/trigger` sends a single prompt to the pool. haiflow routes it to an idle member if one is free, otherwise it goes to the least-loaded member's queue.
+
+<ParamField path="prompt" type="string" required>
+  The prompt to dispatch to the pool.
+</ParamField>
+
+<ParamField path="id" type="string">
+  A custom task id for the dispatched prompt. Auto-generated when omitted.
+</ParamField>
+
+<ParamField path="source" type="string">
+  A label for where the prompt came from. Defaults to `pool:<name>`.
+</ParamField>
+
+<ParamField path="priority" type="number">
+  Queue priority if the prompt is queued behind a member's current work. Higher drains first.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:3333/pool/reviewers/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Review the latest commit and list any bugs."
+  }'
+```
+
+The response tells you which member took the work and whether it ran immediately or was queued:
+
+```json
+{
+  "pool": "reviewers",
+  "member": "reviewer-2",
+  "id": "task_123",
+  "where": "sent"
+}
+```
+
+<ResponseField name="pool" type="string">
+  The pool that handled the prompt.
+</ResponseField>
+
+<ResponseField name="member" type="string">
+  The member session the prompt was routed to.
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  The task id for the dispatched prompt.
+</ResponseField>
+
+<ResponseField name="where" type="string">
+  `sent` if a member was idle and ran it immediately, `queued` if it was added to the least-loaded member's queue, or `queued_offline` if every member is offline (it is queued and runs when a member returns).
+</ResponseField>
+
+## Map a list across the pool
+
+`POST /map` fans a list of items across the pool in parallel, then fires a reducer once every item has come back. This is the fan-in, or JOIN: N parallel agents under one flat subscription, converged into one result.
+
+Each item is rendered into the per-item prompt through `{{item}}`, dispatched to the pool, and collected as the members finish. When the last item returns, the optional reducer runs with all the outputs joined together.
+
+### Request body
+
+<ParamField path="items" type="array" required>
+  The list of items to fan out. Items are strings or objects, and each is stringified into `{{item}}`. Capped at `HAIFLOW_MAP_MAX_ITEMS`, which defaults to `200`.
+</ParamField>
+
+<ParamField path="pool" type="string" required>
+  The pool to fan the items across. Must be a pool name defined in `pipeline.json`.
+</ParamField>
+
+<ParamField path="mapTemplate" type="string" required>
+  The per-item prompt. Supports the variables `{{item}}`, `{{index}}`, `{{total}}`, and `{{runId}}`.
+</ParamField>
+
+<ParamField path="reduce" type="object">
+  Optional reducer. An object with `session` (the session that runs the reduce) and `promptTemplate`. The reduce template supports `{{results}}` (the joined outputs of every item), plus `{{total}}`, `{{pool}}`, and `{{runId}}`.
+</ParamField>
+
+### Map template variables
+
+| Variable | Description |
+| --- | --- |
+| `{{item}}` | The current item, stringified |
+| `{{index}}` | The item's position in the list |
+| `{{total}}` | The total number of items |
+| `{{runId}}` | The id for this map run |
+
+### Example: review files and reduce into one report
+
+This run reviews three source files in parallel across the `reviewers` pool, then merges every review into a single report on the `lead` session.
+
+```bash
+curl -X POST http://localhost:3333/map \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": ["src/a.ts", "src/b.ts", "src/c.ts"],
+    "pool": "reviewers",
+    "mapTemplate": "Review {{item}} and list any bugs.",
+    "reduce": {
+      "session": "lead",
+      "promptTemplate": "Merge these reviews into one report:\n{{results}}"
+    }
+  }'
+```
+
+`POST /map` returns once the work is dispatched, not when it finishes:
+
+```json
+{
+  "runId": "map_abc123",
+  "pool": "reviewers",
+  "total": 3,
+  "reduce": true,
+  "dispatched": [
+    { "index": 0, "taskId": "map_abc123_0", "member": "reviewer-1", "where": "sent" },
+    { "index": 1, "taskId": "map_abc123_1", "member": "reviewer-2", "where": "sent" },
+    { "index": 2, "taskId": "map_abc123_2", "member": "reviewer-3", "where": "sent" }
+  ]
+}
+```
+
+<ResponseField name="runId" type="string">
+  The id for this map run. Use it to poll progress.
+</ResponseField>
+
+<ResponseField name="pool" type="string">
+  The pool the items were fanned across.
+</ResponseField>
+
+<ResponseField name="total" type="number">
+  The number of items in the run.
+</ResponseField>
+
+<ResponseField name="reduce" type="boolean">
+  Whether a reducer is configured for the run.
+</ResponseField>
+
+<ResponseField name="dispatched" type="array">
+  One entry per item dispatched to the pool, each `{ index, taskId, member, where }`.
+</ResponseField>
+
+<Note>
+  If a shard never returns, the reducer does not wait forever. It fires with the partial results it has after `HAIFLOW_MAP_TIMEOUT_SEC`, which defaults to `1800` (30 minutes).
+</Note>
+
+## Track map progress
+
+`GET /map/:runId` returns the current state of a map run, so you can poll until it reduces.
+
+```bash
+curl http://localhost:3333/map/map_abc123 \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+```json
+{
+  "runId": "map_abc123",
+  "pool": "reviewers",
+  "total": 3,
+  "collected": 2,
+  "reduced": false,
+  "reduceTaskId": null
+}
+```
+
+<ResponseField name="runId" type="string">
+  The map run id.
+</ResponseField>
+
+<ResponseField name="pool" type="string">
+  The pool the run is using.
+</ResponseField>
+
+<ResponseField name="total" type="number">
+  The total number of items in the run.
+</ResponseField>
+
+<ResponseField name="collected" type="number">
+  How many item outputs have come back so far.
+</ResponseField>
+
+<ResponseField name="reduced" type="boolean">
+  Whether the reducer has fired.
+</ResponseField>
+
+<ResponseField name="reduceTaskId" type="string">
+  The task id of the reduce step once it has fired.
+</ResponseField>
+
+<Tip>
+  Poll `GET /map/:runId` until `reduced` is `true`, then read the reducer's output from the `reduceTaskId` task.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Pipelines" icon="diagram-project" href="/guides/pipelines">
+    Chain agents with pub/sub topics, including a worker pool stage.
+  </Card>
+  <Card title="Sessions" icon="terminal" href="/concepts/sessions">
+    Start each pool member as its own session with its own cwd.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    Full reference for the pool, map, and trigger endpoints.
+  </Card>
+</CardGroup>

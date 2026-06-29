@@ -1,0 +1,111 @@
+---
+title: Installation
+description: "Prerequisites, install methods, hook wiring, and platform notes."
+icon: "download"
+---
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Bun v1.2.3+" icon="bolt" href="https://bun.sh">
+    The runtime haiflow is built on. The one-liner installs it for you if missing.
+  </Card>
+  <Card title="tmux" icon="terminal" href="https://github.com/tmux/tmux">
+    Each session is a detached tmux session running the `claude` CLI.
+  </Card>
+  <Card title="Claude Code CLI" icon="anthropic" href="https://docs.anthropic.com/en/docs/claude-code">
+    The agent haiflow drives. Sign in once and haiflow reuses your login.
+  </Card>
+  <Card title="jq" icon="code" href="https://jqlang.github.io/jq/">
+    Used by the hook scripts and the doctor health check.
+  </Card>
+</CardGroup>
+
+<Note>
+**Redis is optional but recommended.** Without it, pipeline events still fire but are not persisted, and the signed-webhook gateway fails closed. With it, you get event persistence, delivery retry, and webhook replay protection. Run one with `docker run -d -p 6379:6379 redis`.
+</Note>
+
+## Install methods
+
+<Tabs>
+  <Tab title="One-liner">
+    The fastest path on macOS or Linux:
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/andersonaguiar/haiflow/main/install.sh | bash
+    ```
+
+    This installs Bun if missing, checks for `tmux` / `jq` / `claude` / `redis`, installs the `haiflow` CLI globally, and wires up the Claude Code hooks.
+
+    | Override | Effect |
+    | --- | --- |
+    | `HAIFLOW_SKIP_SETUP=1` | Skip hook installation |
+    | `HAIFLOW_INSTALL_METHOD=npm` | Force the npm registry instead of source |
+
+    Prefer to inspect first? `curl -fsSL .../install.sh | less`.
+  </Tab>
+  <Tab title="From source">
+    ```bash
+    git clone https://github.com/andersonaguiar/haiflow.git
+    cd haiflow
+    bun install      # also installs Claude Code hooks automatically
+    cp .env.example .env
+    # Edit .env and set HAIFLOW_API_KEY
+    bun run dev      # server with hot reload, or `bun run start` for no reload
+    ```
+  </Tab>
+  <Tab title="npm">
+    ```bash
+    npm install -g haiflow
+    haiflow serve
+    ```
+  </Tab>
+</Tabs>
+
+## Wire the Claude Code hooks
+
+haiflow uses [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) to track session state. The setup command merges hook config into `~/.claude/settings.json`:
+
+```bash
+haiflow setup     # or: bun run setup
+```
+
+This registers five hooks: `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`, and `Notification`. They are thin HTTP forwarders that POST Claude Code events to the haiflow server. If the server is not running, they silently no-op, and they never interfere with non-orchestrated Claude sessions (the server ignores unknown session ids).
+
+<Warning>
+Hooks are the number-one silent failure. If they are not wired, `/session/start` returns `409`, sessions sit busy forever, and responses are never captured. After upgrading, run `haiflow setup` again to pick up new hooks (for example the `Notification` hook added for the watchdog).
+</Warning>
+
+## One-shot onboarding
+
+`haiflow init` wires hooks, starts a session, fires a smoke-test prompt, and verifies the hooks end to end:
+
+```bash
+haiflow init /path/to/your/project
+```
+
+It prints exactly where things break if they do, then points you at the dashboard.
+
+## Verify your install
+
+```bash
+bun run deps      # check all dependencies are present
+haiflow doctor    # report hook/session health for every session
+```
+
+## Platform support
+
+<Info>
+macOS and Linux only. Windows is not supported yet, because haiflow depends on `tmux` and POSIX shell scripts. On Windows, run it inside WSL2.
+</Info>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Set the environment variables for your deployment.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Send your first prompt and read the response.
+  </Card>
+</CardGroup>

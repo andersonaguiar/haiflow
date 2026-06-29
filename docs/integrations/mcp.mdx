@@ -1,0 +1,164 @@
+---
+title: MCP server
+description: "Drive haiflow as MCP tools from Claude Desktop, Cursor, Cline, or another Claude Code."
+icon: plug
+---
+
+haiflow ships a Model Context Protocol server at `integrations/haiflow-mcp`. It exposes haiflow's Claude Code orchestration as MCP tools, so any MCP-capable agent (Claude Desktop, Cursor, Cline, or another Claude Code) can start sessions, run prompts, and chain agents through haiflow.
+
+The server is a thin stdio adapter over haiflow's [HTTP API](/api-reference/introduction). It does not run Claude Code itself, it forwards your tool calls to a running haiflow server. Point it at one with `HAIFLOW_URL`, give it your `HAIFLOW_API_KEY`, and your agent gets a clean set of tools for orchestrating work.
+
+<Note>
+The server speaks MCP over stdio. Diagnostics go to stderr, so they never corrupt the protocol stream on stdout.
+</Note>
+
+## Tools
+
+The server registers eight tools. Most map directly to a haiflow endpoint, so the same rules apply: every call needs a valid `HAIFLOW_API_KEY`, and sessions require haiflow's hooks to be wired (see [Prerequisites](#prerequisites)).
+
+| Tool | What it does | Key arguments |
+| --- | --- | --- |
+| `haiflow_run` | Run a prompt and wait for the result. Triggers, then streams until complete. | `ephemeral`, `session`, `cwd`, `timeoutSec` |
+| `haiflow_start_session` | Start a session. | `session`, `cwd` |
+| `haiflow_trigger` | Fire a prompt without waiting. Returns a task id. | `session`, `id`, `cwd`, `ephemeral`, `callbackUrl`, `priority`, `dedupKey` |
+| `haiflow_get_response` | Fetch a task result by id. | `id` |
+| `haiflow_stop_session` | Stop a session. | `session` |
+| `haiflow_status` | Status of one session, or all sessions when none is given. | `session` |
+| `haiflow_doctor` | Health check. Catches the case where tmux is running but hooks are not linked. | `session` |
+| `haiflow_map` | Map a list of items across a worker pool in parallel, then reduce. | `items`, `pool`, `mapTemplate`, `reduceSession`, `reducePromptTemplate` |
+
+### Run versus trigger
+
+`haiflow_run` blocks until the task completes. It consumes haiflow's SSE stream internally, so your agent gets the full response in a single tool call. This is the simplest option for short, interactive work.
+
+`haiflow_get_response` reflects task state with three outcomes:
+
+<ResponseField name="200" type="done">
+The task finished. The body carries the result.
+</ResponseField>
+
+<ResponseField name="202" type="pending">
+The task is still running. Call again later.
+</ResponseField>
+
+<ResponseField name="404" type="unknown">
+No task with that id.
+</ResponseField>
+
+<Tip>
+For long jobs, do not block on `haiflow_run`. Prefer `haiflow_trigger` with a `callbackUrl` ([fire and forget](/guides/fire-and-forget)), or `haiflow_trigger` followed by `haiflow_get_response` polling on the returned id.
+</Tip>
+
+### Fan out with map
+
+`haiflow_map` distributes `items` across a [worker pool](/guides/worker-pools), runs `mapTemplate` per item in parallel, then reduces the results through `reduceSession` using `reducePromptTemplate`. Use it when you have a batch of similar units of work and want a single combined answer back.
+
+## Configuration
+
+The server reads two environment variables.
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `HAIFLOW_URL` | No | `http://localhost:3333` | Base URL of the haiflow server. |
+| `HAIFLOW_API_KEY` | Yes | none | Bearer key. Required by every endpoint except health and version. |
+
+<Warning>
+`HAIFLOW_API_KEY` is the secret that protects your haiflow server. It is not a paid Anthropic key, haiflow runs on your flat Claude Code subscription. Treat it like any other server credential and keep it out of version control. See [Security](/security).
+</Warning>
+
+## Prerequisites
+
+The MCP server only forwards requests, so the haiflow server on the other end must be set up correctly.
+
+<Steps>
+  <Step title="Run a haiflow server">
+    Start haiflow and confirm it is reachable at `HAIFLOW_URL`. See [Installation](/installation) and [Configuration](/configuration).
+  </Step>
+  <Step title="Wire the hooks">
+    Run `haiflow setup` so haiflow's hooks are linked. Without them, `haiflow_start_session` returns `409` and `haiflow_doctor` reports why.
+  </Step>
+</Steps>
+
+<Info>
+Outbound text is redacted before it leaves the box, so tool results may contain `[REDACTED:type]` markers. See [Security](/security) for what gets stripped.
+</Info>
+
+## Run it directly
+
+Hosts normally spawn the server for you (see [Wiring it up](#wiring-it-up)). To run it by hand, for example to smoke test the connection:
+
+```bash
+cd integrations/haiflow-mcp
+bun install
+HAIFLOW_URL=http://localhost:3333 HAIFLOW_API_KEY=your-secret bun run index.ts
+```
+
+The process speaks MCP on stdin and stdout and logs diagnostics to stderr. It stays attached until you stop it.
+
+## Wiring it up
+
+Each host points at the same `index.ts` and passes the two environment variables. Use an absolute path to the file.
+
+<Tabs>
+  <Tab title="Claude Desktop, Cline, Cursor">
+    Add an `mcpServers` entry to the host's MCP config:
+
+    ```json
+    {
+      "mcpServers": {
+        "haiflow": {
+          "command": "bun",
+          "args": ["run", "/absolute/path/to/haiflow/integrations/haiflow-mcp/index.ts"],
+          "env": {
+            "HAIFLOW_URL": "http://localhost:3333",
+            "HAIFLOW_API_KEY": "your-secret"
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Claude Code">
+    Register the server with the CLI:
+
+    ```bash
+    claude mcp add haiflow \
+      --env HAIFLOW_URL=http://localhost:3333 \
+      --env HAIFLOW_API_KEY=your-secret \
+      -- bun run /absolute/path/to/haiflow/integrations/haiflow-mcp/index.ts
+    ```
+  </Tab>
+</Tabs>
+
+Once registered, restart or reload the host and the eight `haiflow_*` tools become available to the agent.
+
+## Verify the connection
+
+After wiring, ask the agent to call `haiflow_doctor`. A healthy response confirms the server can reach haiflow and that the hooks are linked. If it flags a problem, work through [Troubleshooting](/guides/troubleshooting).
+
+<Check>
+`haiflow_doctor` returns healthy, then `haiflow_start_session` succeeds without a `409`.
+</Check>
+
+## MCP versus the bundled skill
+
+The MCP server is the right tool when an external host (Claude Desktop, Cursor, Cline, or a separate Claude Code) needs to orchestrate haiflow.
+
+Inside a Claude Code session, you do not need the MCP server at all. The bundled `haiflow` skill teaches the agent to drive the HTTP API directly, so it can start sessions, trigger prompts, and chain agents using plain curl and fetch against the same endpoints.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="HTTP API reference" icon="code" href="/api-reference/introduction">
+    The endpoints every MCP tool forwards to.
+  </Card>
+  <Card title="Fire and forget" icon="paper-plane" href="/guides/fire-and-forget">
+    Trigger long jobs with a callback instead of blocking.
+  </Card>
+  <Card title="Worker pools" icon="diagram-project" href="/guides/worker-pools">
+    Back `haiflow_map` with a pool of parallel workers.
+  </Card>
+  <Card title="Security" icon="shield" href="/security">
+    API keys, redaction, and what leaves the box.
+  </Card>
+</CardGroup>

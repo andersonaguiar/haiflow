@@ -1,0 +1,281 @@
+---
+title: CLI reference
+description: "Every haiflow command line subcommand, its options, and examples."
+icon: "terminal"
+---
+
+The `haiflow` CLI is the fastest way to drive the orchestrator from your terminal. Use it to install hooks, start and stop Claude Code sessions, send prompts, inspect status, and read responses back.
+
+Most commands are thin clients: they call a running server on `http://localhost:$PORT` and authenticate with `HAIFLOW_API_KEY`. A few commands run entirely in the current process and do not need the server: `serve`, `github`, `setup`, and `version`.
+
+<Note>
+Running from source? `bun run bin/haiflow.ts <command>` is equivalent to `haiflow <command>` everywhere in this page.
+</Note>
+
+## Command overview
+
+| Command | What it does | Talks to server |
+| --- | --- | --- |
+| `serve` | Run the haiflow server in this process. | No (it is the server) |
+| `github` | Run the GitHub webhook bridge in this process. | No |
+| `setup` | Install the Claude Code hooks into `~/.claude/settings.json`. | No |
+| `init [dir]` | One-shot onboarding: install hooks, start a session, verify, smoke-test. | Yes |
+| `doctor [session]` | Report hook and session health. | Yes |
+| `start <session>` | Start a Claude session. `--cwd` is optional. | Yes |
+| `stop [session]` | Stop a Claude session (default `default`). | Yes |
+| `trigger <prompt>` | Send a prompt to a session. | Yes |
+| `status [session]` | Show a session's status. | Yes |
+| `sessions` | List all sessions. | Yes |
+| `prune` | Remove stale offline sessions. | Yes |
+| `responses [id]` | List response ids or print one response as JSON. | Yes |
+| `version` | Print the haiflow version. | No |
+
+## Local commands
+
+These commands run in the current process and never call the server.
+
+### serve
+
+Run the haiflow server in this process. The server listens on `PORT` (default `3333`) and is what every other client command talks to.
+
+```bash
+haiflow serve
+```
+
+<Tip>For long-running deployments, run `serve` under a process manager rather than a foreground shell. See [Deployment](/deployment).</Tip>
+
+### github
+
+Run the GitHub webhook bridge in this process. The bridge receives GitHub events and turns them into prompts for your sessions.
+
+```bash
+haiflow github
+```
+
+See the [GitHub bridge guide](/guides/github-bridge) for webhook setup and signing.
+
+### setup
+
+Install the Claude Code hooks into `~/.claude/settings.json`. Hooks are what let haiflow capture each response and track session lifecycle, so this is a one-time prerequisite before sessions can report back.
+
+```bash
+haiflow setup
+```
+
+## Session and prompt commands
+
+The commands below call the server, so make sure `haiflow serve` is running and `HAIFLOW_API_KEY` is set in your environment.
+
+### init
+
+One-shot onboarding. `init` installs the hooks, starts a session in `dir`, verifies the hooks are linked, and fires a smoke-test prompt end to end so you know the whole pipeline works before you build on it.
+
+```bash
+haiflow init /path/to/project
+```
+
+<ParamField path="dir" type="string">
+Working directory for the session. Defaults to the current directory.
+</ParamField>
+
+<ParamField path="--session" type="string">
+Session name to create. Defaults to `default`.
+</ParamField>
+
+### start
+
+Start a Claude session. The `--cwd` flag is optional and sets the working directory the session operates in. When omitted, haiflow uses `HAIFLOW_CWD` if the server pins one, otherwise it falls back to `/tmp`.
+
+```bash
+haiflow start worker --cwd /path/to/project
+```
+
+<ParamField path="session" type="string" default="default">
+Name of the session to start. Defaults to `default` when omitted.
+</ParamField>
+
+<ParamField path="--cwd" type="string">
+Absolute path to the working directory for the session. Optional: defaults to `HAIFLOW_CWD` if pinned, otherwise `/tmp`.
+</ParamField>
+
+### stop
+
+Stop a Claude session. With no argument, it stops the `default` session.
+
+```bash
+haiflow stop worker
+```
+
+### trigger
+
+Send a prompt to a session. `trigger` prints `Sent: <id>` when the prompt runs immediately, or `Queued (position N): <id>` when the session is busy and the prompt is enqueued.
+
+```bash
+haiflow trigger "explain this codebase" --session worker
+```
+
+Pass a slash command as the prompt to invoke a Claude Code command, and use `--id` to set your own task id for later lookup:
+
+```bash
+haiflow trigger "/daily-update" --session worker --id daily-001
+```
+
+<ParamField path="prompt" type="string" required>
+The prompt text to send. Slash commands are supported.
+</ParamField>
+
+<ParamField path="--session" type="string">
+Target session name. Defaults to `default`.
+</ParamField>
+
+<ParamField path="--id" type="string">
+A task id to attach to this prompt. Use it to fetch the response later with `responses <id>`.
+</ParamField>
+
+<ParamField path="--source" type="string">
+A source label for the prompt, useful for attributing where a trigger came from.
+</ParamField>
+
+<Tip>Read the response back once it completes with `haiflow responses <id>`. See [`responses`](#responses) below.</Tip>
+
+## Inspection commands
+
+### status
+
+Show a session's status, including the session name, its status, how long it has been in that state, the queue length, and the current prompt.
+
+```bash
+haiflow status worker
+```
+
+With no argument, `status` reports the `default` session.
+
+### sessions
+
+List all sessions known to the server.
+
+```bash
+haiflow sessions
+```
+
+### doctor
+
+Report hook and session health. With no session argument, `doctor` reports on all sessions. It catches the common failure mode where tmux is running but the hooks are not linked, which otherwise looks healthy but never captures responses.
+
+```bash
+haiflow doctor worker
+```
+
+<Warning>If `doctor` reports tmux running but hooks not linked, run `haiflow setup` and restart the session. See [Troubleshooting](/guides/troubleshooting).</Warning>
+
+### responses
+
+With an `id`, print that response as JSON. Without an `id`, list response ids and their completion times.
+
+<CodeGroup>
+```bash List responses
+haiflow responses --session worker
+```
+
+```bash Print one response
+haiflow responses daily-001 --session worker
+```
+</CodeGroup>
+
+<ParamField path="id" type="string">
+The response id to print. Omit to list available response ids.
+</ParamField>
+
+<ParamField path="--session" type="string">
+Session to read responses from. Defaults to `default`.
+</ParamField>
+
+### prune
+
+Remove stale offline sessions. Use `--older-than-hours` to control how old an offline session must be before it is removed.
+
+```bash
+haiflow prune --older-than-hours 48
+```
+
+<ParamField path="--older-than-hours" type="number">
+Only prune offline sessions older than this many hours.
+</ParamField>
+
+### version
+
+Print the haiflow version. `--version` and `-v` do the same thing.
+
+```bash
+haiflow version
+```
+
+## Global options
+
+These options are shared across the commands that use them.
+
+| Option | Type | Used by | Description |
+| --- | --- | --- | --- |
+| `--cwd <path>` | string | `start` | Working directory. Optional for `start`; defaults to `HAIFLOW_CWD` if pinned, otherwise `/tmp`. |
+| `--session <name>` | string | `init`, `trigger`, `responses` | Target session name. Defaults to `default`. |
+| `--id <id>` | string | `trigger` | Task id to attach to a prompt. |
+| `--source <name>` | string | `trigger` | Source label for a prompt. |
+
+## Environment
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PORT` | `3333` | Port the server listens on. Client commands call `http://localhost:$PORT`. |
+| `HAIFLOW_API_KEY` | none | Bearer token required by the server and the bridges. Set it in the same environment as `serve`, `github`, and any client command. |
+
+<Info>
+`HAIFLOW_API_KEY` is a secret you choose to protect your server. It is not a paid Anthropic key: haiflow runs on your existing Claude Code subscription, so there are no per-token API costs.
+</Info>
+
+## Examples
+
+A full first run, from installing hooks to sending prompts and checking health:
+
+```bash
+# Install the Claude Code hooks (one time)
+haiflow setup
+
+# One-shot onboarding: hooks, session, verify, smoke test
+haiflow init /path/to/project
+
+# Start a named session in a project directory
+haiflow start worker --cwd /path/to/project
+
+# Send a prompt to the worker session
+haiflow trigger "explain this codebase" --session worker
+
+# Send a slash command with your own task id
+haiflow trigger "/daily-update" --session worker --id daily-001
+
+# Inspect a session and list everything that is running
+haiflow status worker
+haiflow sessions
+
+# Check hook and session health
+haiflow doctor worker
+
+# Clean up offline sessions older than 48 hours
+haiflow prune --older-than-hours 48
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Go from nothing to your first captured response.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    The HTTP endpoints behind these commands.
+  </Card>
+  <Card title="GitHub bridge" icon="github" href="/guides/github-bridge">
+    Turn GitHub events into prompts with `haiflow github`.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Fix unlinked hooks, stuck sessions, and missing responses.
+  </Card>
+</CardGroup>

@@ -1,0 +1,135 @@
+---
+title: Configuration
+description: "Every environment variable haiflow reads, grouped by purpose."
+icon: "gear"
+---
+
+haiflow is configured entirely through environment variables. Bun loads `.env` automatically, so copy `.env.example` to `.env` and edit, or export the variables in your shell. Only `HAIFLOW_API_KEY` is required.
+
+<Note>
+In `production` mode haiflow fails closed at boot: it refuses to start on an insecure exposure or with a weak/placeholder key. Development is permissive (no tunnel required). See [Deployment](/deployment) and [Security](/security).
+</Note>
+
+## Core
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_API_KEY` | _(none)_ | **Required.** Any secret string you choose (for example `openssl rand -hex 32`). This protects the HTTP API, it is not a paid Anthropic key. In production it must be at least 24 chars and not a placeholder. |
+| `PORT` | `3333` | HTTP server port. |
+| `HAIFLOW_ENV` | `development` | `development` or `production`. Falls back to `NODE_ENV`. Production fails closed on insecure exposure. |
+| `HAIFLOW_DATA_DIR` | `/tmp/haiflow` | Directory for session state, queues, responses, the task ledger (`haiflow.db`), `pipeline.json`, and `ingest.json`. The default is wiped on reboot, so point it somewhere persistent to keep history. |
+| `HAIFLOW_PORT` | `PORT` | Port the hook scripts use to reach the server. haiflow auto-injects `HAIFLOW_PORT=PORT` into every session it spawns (via `tmux -e`), so it normally needs no manual setting (a manually set value is ignored for server-spawned sessions). The hook script's own standalone fallback default is the literal `3333`. |
+
+## Network & exposure
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_HOST` | `127.0.0.1` | Bind address. Loopback by default so the origin is only reachable through a front proxy or tunnel. |
+| `HAIFLOW_ALLOW_PUBLIC_BIND` | `false` | Acknowledge a public bind (`0.0.0.0` / LAN / public IP) in production. Without it, production refuses to start when bound publicly. |
+
+<Warning>
+**The golden rule: never expose the raw origin.** An identity layer (for example Cloudflare Access) only protects you if the public cannot reach haiflow's port directly. Keep `HAIFLOW_HOST` on loopback when fronting with a tunnel.
+</Warning>
+
+## Sessions & working directory
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_CWD` | _(none)_ | Force every session to this directory. When set, the `cwd` in `/session/start` bodies is ignored (a warning is logged if it differs). |
+| `HAIFLOW_ALLOW_REQUEST_CWD` | `true` | When `false`, `/session/start` rejects requests that set their own `cwd`. `HAIFLOW_CWD` must then be set server-side. |
+| `HAIFLOW_START_READY_TIMEOUT_MS` | `15000` | How long `/session/start` waits for the `SessionStart` hook to link a Claude session id before failing. A session that never links would silently drop every response (usually means hooks are not wired). |
+| `HAIFLOW_SESSION_TTL_HOURS` | `24` | Default age above which `POST /sessions/prune` reaps an offline session's state directory. |
+
+<Note>
+`cwd` is optional on `POST /session/start`. When a caller omits it, haiflow uses `HAIFLOW_CWD` if pinned, otherwise it falls back to `/tmp` (a neutral scratch dir, so a bare start never runs in or exposes wherever the server was launched). Set `HAIFLOW_CWD` or pass `cwd` to run in a real project.
+</Note>
+
+## Guardrails & redaction
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_GUARDRAILS` | `true` | Installs `~/.claude/skills/haiflow-guardrails/SKILL.md` on boot and injects `/haiflow-guardrails` into each new session. The skill tells Claude to refuse paths outside cwd, refuse to read secrets, and refuse network exfiltration. |
+| `HAIFLOW_REDACT` | `true` | Best-effort DLP: strips well-known credential shapes (AWS/GitHub/Stripe/Google/Anthropic/OpenAI keys, Slack tokens, JWTs, Bearer tokens, private keys) from all outbound text. |
+| `HAIFLOW_REDACT_EMAILS` | `false` | Also redact email addresses (noisier, so opt-in). |
+| `HAIFLOW_REDACT_EXTRA` | _(none)_ | Extra redaction patterns, as a JSON array of regex strings. Example: `["ACME-\\d{4,}","internal-[a-f0-9]{8}"]`. |
+
+<Note>
+Guardrails and redaction are mitigations, not a sandbox. Anyone who can get a prompt executed can run code as the operator. The real perimeter is the API key, the hook localhost restriction, the webhook signatures, and the bridge allowlists. See [Security](/security).
+</Note>
+
+## Watchdog
+
+Catches sessions wedged on a permission prompt.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_TASK_TIMEOUT_SEC` | `0` | Hard per-task timeout in seconds. `0` disables it. A task running longer is flagged (and recovered if recovery is on). |
+| `HAIFLOW_WAITING_GRACE_SEC` | `120` | How long a session flagged `waiting` by Claude's `Notification` hook may stay blocked before the watchdog acts. |
+| `HAIFLOW_WATCHDOG_RECOVER` | `false` | When `true`, auto-recover a wedged session (send Escape, mark the task `timed_out`, drain the queue). Default is alert-only. |
+| `HAIFLOW_WATCHDOG_INTERVAL_MS` | `15000` | How often the watchdog scans for wedged sessions and reaps timed-out map runs. |
+| `HAIFLOW_USAGE_ALERT_TOKENS` | _(none)_ | When set, `GET /usage/window` flags `alert: true` once the rolling 5h token total crosses it. Alert-only, never throttles. |
+
+## Fire-and-forget callbacks
+
+Controls the per-`/trigger` `callbackUrl` completion webhook.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_ALLOW_TRIGGER_CALLBACK` | `false` | Enables `callbackUrl`. Off by default because an arbitrary callback URL is an SSRF surface. |
+| `HAIFLOW_CALLBACK_ALLOW_HOSTS` | _(none)_ | Comma-separated host allowlist for `callbackUrl`. With it set, callbacks to any other host return `400`. |
+
+## Worker pools & map-reduce
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_MAP_MAX_ITEMS` | `200` | Max items one `POST /map` call may fan across a pool. |
+| `HAIFLOW_MAP_TIMEOUT_SEC` | `1800` | How long a map run waits for stragglers before the reducer fires with partial results. |
+
+## Dashboard terminal
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_ALLOW_TAKEOVER` | `true` | Allow the dashboard terminal to switch to a writable attach (take the wheel). A writable terminal bypasses the structural checks and the guardrail skill, so it is gated by the API key. Set `false` to disable writable mode (read-only always works). |
+
+## Redis & pipeline
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `REDIS_URL` | `redis://localhost:6379` | Redis URL for pipeline event persistence and delivery tracking. Falls back to direct dispatch without it. |
+
+## Signed inbound webhooks
+
+For the `POST /ingest/:source` gateway. See [Inbound webhooks](/guides/inbound-webhooks).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_INGEST_ALLOW_WITHOUT_REDIS` | `false` | When `true`, accept the replay risk and keep serving ingest without Redis. Otherwise the gateway fails closed (`503`). |
+| `HAIFLOW_INGEST_NONCE_TTL_SEC` | `604800` | How long a signed delivery's replay nonce is remembered (7 days). Bounds how often a captured webhook can be replayed for schemes without a signed timestamp. |
+| `HAIFLOW_INGEST_RATE_PER_MIN` | `120` | Per-source rate limit (requests/minute). Exceeding it returns `429`. Set `0` to disable. |
+
+## n8n
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `N8N_URL` | `http://localhost:5678` | n8n instance URL. |
+| `N8N_API_KEY` | _(none)_ | n8n API key for workflow integration. |
+
+## GitHub bridge
+
+For `haiflow github`. See [GitHub bridge](/guides/github-bridge).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAIFLOW_URL` | `http://localhost:$PORT` | Base URL the bridge calls. |
+| `GITHUB_WEBHOOK_SECRET` | _(none)_ | **Required.** Webhook secret configured on the GitHub App/repo webhook. |
+| `GITHUB_ALLOWED_REPOS` | _(none)_ | Comma-separated repo allowlist. Required to act. |
+| `GITHUB_ALLOWED_SENDERS` | _(none)_ | Comma-separated sender allowlist. Required to act. |
+| `GITHUB_SESSION` | `default` | Which session the bridge drives (its cwd should be the cloned repo). |
+| `GITHUB_PORT` | `3334` | Port the bridge listens on for GitHub webhooks. |
+| `GITHUB_TRIGGER_PHRASE` | `@haiflow` | Phrase that triggers the bridge in a comment. |
+| `GITHUB_POST_COMMENTS` | `true` | Whether to post Claude's summary back as a GitHub comment via `gh`. |
+| `GITHUB_RESPONSE_TIMEOUT` | `600` | Seconds the bridge waits on the Claude response stream before giving up (max `600`). |
+
+<Warning>
+Both `GITHUB_ALLOWED_REPOS` and `GITHUB_ALLOWED_SENDERS` are the trust boundary. With either empty, every webhook is refused. Anyone who can comment on an allowlisted repo can drive Claude, so keep both lists tight.
+</Warning>

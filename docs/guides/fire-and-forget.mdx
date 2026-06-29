@@ -1,0 +1,143 @@
+---
+title: Fire-and-forget jobs
+description: "Self-contained one-shot tasks with auto start/stop (ephemeral) and completion webhooks (callbackUrl)."
+icon: bolt
+---
+
+Fire-and-forget jobs let a single `POST /trigger` stand on its own. Instead of starting a session, sending a prompt, polling for the result, and stopping the session as four separate calls, you fold the whole lifecycle into one request. haiflow can bring a session up, run the prompt, push the result to a URL you choose, and tear the session back down, all without a follow-up call from you.
+
+Two independent options drive this, and you can use one, both, or neither:
+
+| Option | What it does |
+| --- | --- |
+| `ephemeral` | Auto-starts an offline session, runs the prompt, and stops the session once it responds (only if nothing else is queued). |
+| `callbackUrl` | Registers a completion webhook so haiflow POSTs the finished task to your URL. |
+
+`ephemeral` controls the session lifecycle. `callbackUrl` controls where the result goes. They are orthogonal, so reach for whichever the job needs.
+
+## Ephemeral sessions
+
+Set `ephemeral: true` on a `/trigger` to make that one call self-contained:
+
+1. If the target session is offline, haiflow auto-starts it using the `cwd` you resolve. If no `cwd` is resolvable, the call returns `400`.
+2. The prompt runs in that session.
+3. Once the session responds, haiflow stops it, but only if nothing else is queued.
+
+That last condition matters. An ephemeral job never abandons queued work. If other tasks are waiting on the session when the prompt finishes, haiflow leaves the session running so the queue can drain. See [Queueing](/concepts/queueing) for how per-session queues behave.
+
+<Warning>
+  An ephemeral trigger returns `400` when the session is offline and no `cwd` can be resolved. A fresh session needs a working directory to start in, so always pass `cwd` for jobs that may need to cold-start.
+</Warning>
+
+When you set `ephemeral`, the trigger response echoes back the flags that apply so you can see what haiflow decided. Each flag is present only when it is `true` and is otherwise absent (not `false`):
+
+<ResponseField name="autoStarted" type="boolean">
+  Present when haiflow started the session for this trigger because it was offline.
+</ResponseField>
+
+<ResponseField name="ephemeral" type="boolean">
+  Present when the trigger was handled as an ephemeral, self-contained job.
+</ResponseField>
+
+<ResponseField name="callbackScheduled" type="boolean">
+  Present when a completion callback was registered for this task.
+</ResponseField>
+
+## Completion webhooks
+
+`callbackUrl` registers a completion webhook for a single task. When the task finishes, haiflow POSTs a JSON body to that URL describing the result:
+
+```json
+{
+  "event": "task.completed",
+  "id": "task-001",
+  "session": "worker",
+  "status": "completed",
+  "messages": ["..."],
+  "model": "claude-...",
+  "usage": {
+    "totalTokens": 1234,
+    "inputTokens": 1000,
+    "outputTokens": 234,
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0
+  },
+  "completedAt": "2026-06-28T10:00:00.000Z"
+}
+```
+
+The `messages` field is redacted by the same egress pass that scrubs every other outbound payload, so a callback never leaks more than your normal responses do. See [Context management](/concepts/context-management) for what that egress pass covers.
+
+Delivery is best-effort. A failed POST is logged, never retried inline, and never blocks the session. Treat the callback as a notification, not a guaranteed-once delivery channel: if your endpoint must not miss results, have it acknowledge receipt and reconcile against the [API](/api-reference/introduction) for anything it did not see.
+
+<Note>
+  A `callbackUrl` works with or without `ephemeral`. Use it on a long-lived worker to get pushed results, or pair it with `ephemeral` for a fully hands-off one-shot.
+</Note>
+
+## Enabling callbacks
+
+An arbitrary callback URL is a server-side request forgery (SSRF) surface, so haiflow keeps `callbackUrl` **off by default**. With callbacks disabled, passing a `callbackUrl` returns `400`.
+
+To enable it, set the environment variable:
+
+```bash
+HAIFLOW_ALLOW_TRIGGER_CALLBACK=true
+```
+
+To restrict where callbacks may be sent, list the allowed hosts:
+
+```bash
+HAIFLOW_CALLBACK_ALLOW_HOSTS=host1,host2
+```
+
+<Warning>
+  Only enable trigger callbacks when you control the URLs being passed. Pin them to an allowlist with `HAIFLOW_CALLBACK_ALLOW_HOSTS` so a trigger cannot make your server reach internal or unintended hosts. See [Security](/security) for the full threat model.
+</Warning>
+
+See [Configuration](/configuration) for these and the rest of haiflow's environment variables.
+
+## One-shot example
+
+This single call brings a session up, runs a task, POSTs the result, and tears the session back down. It needs `HAIFLOW_ALLOW_TRIGGER_CALLBACK=true` on the server for the `callbackUrl` to be accepted.
+
+```bash
+curl -X POST http://localhost:3333/trigger \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "summarize recent commits",
+    "session": "oneshot",
+    "cwd": "/path/to/project",
+    "ephemeral": true,
+    "callbackUrl": "https://my-app.example.com/haiflow-done"
+  }'
+```
+
+Because the `oneshot` session is offline, haiflow auto-starts it in `/path/to/project`, runs the prompt, and the trigger response confirms the plan:
+
+```json
+{
+  "autoStarted": true,
+  "ephemeral": true,
+  "callbackScheduled": true
+}
+```
+
+When the task completes, your endpoint at `https://my-app.example.com/haiflow-done` receives the `task.completed` body shown above, and haiflow stops the `oneshot` session (since nothing else is queued for it).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Queueing" icon="layer-group" href="/concepts/queueing">
+    How per-session queues drain, and why ephemeral jobs never abandon them.
+  </Card>
+  <Card title="Context management" icon="shield-halved" href="/concepts/context-management">
+    The egress pass that redacts callback messages.
+  </Card>
+  <Card title="Security" icon="lock" href="/security">
+    SSRF, allowlists, and hardening trigger callbacks.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    Full `/trigger` parameters and response fields.
+  </Card>
+</CardGroup>

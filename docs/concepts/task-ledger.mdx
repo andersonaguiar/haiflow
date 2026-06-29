@@ -1,0 +1,189 @@
+---
+title: Task ledger
+description: "Every task recorded in a durable SQLite ledger: what it ran, changed, spent, and how long it took."
+icon: "database"
+---
+
+Every task haiflow runs is recorded in a durable SQLite ledger (`haiflow.db` in `HAIFLOW_DATA_DIR`). When a task completes, haiflow mines the same Claude Code transcript it parses for the `Stop` hook and stores a structured record of the work: the ordered tool calls, the commands that ran, the files that changed (with real diffs), token usage, the model, timing, and the estimated cost avoided (`saved_usd`).
+
+This gives you an auditable history of what each Claude Code run actually did, without scraping terminal output. You can query it over the API or browse it in the dashboard [History tab](/guides/dashboard).
+
+## What gets recorded
+
+Each task in the ledger captures:
+
+- **`steps[]`**: the ordered tool calls. Each step has a `seq` index, a `tool` name, a `summary`, an `isError` flag, an optional `detail` (for edits, the mini-diff), and a `filePath` when the tool touched a file.
+- **`commands_run`**: the shell commands the task executed.
+- **`files_changed`**: the files the task created or modified.
+- **`usage`**: token consumption for the run.
+- **`model`**: the Claude model that handled the task.
+- **`duration_ms`**: wall-clock time the task took.
+- **`saved_usd`**: the estimated API cost avoided by running on your flat Claude Code subscription. See [Usage and savings](/guides/usage-and-savings).
+
+## Durability
+
+<Warning>
+The ledger lives in `HAIFLOW_DATA_DIR`, which defaults to `/tmp/haiflow` and is wiped on reboot. Point `HAIFLOW_DATA_DIR` at a persistent directory to keep task history across restarts.
+</Warning>
+
+See [Configuration](/configuration) for the full list of variables that read from `HAIFLOW_DATA_DIR`.
+
+## List tasks
+
+`GET /tasks` returns recorded tasks, newest first. It responds with `{ tasks, total }`.
+
+### Query parameters
+
+<ParamField query="session" type="string">
+  Filter to tasks from a single session.
+</ParamField>
+
+<ParamField query="status" type="string">
+  Filter by lifecycle status: `running`, `completed`, `timed_out`, `cancelled`, or `failed`.
+</ParamField>
+
+<ParamField query="source" type="string">
+  Filter by trigger source, such as `trigger`, `queue`, or `pipeline:<topic>`.
+</ParamField>
+
+<ParamField query="since" type="string (ISO 8601)">
+  Lower bound on `started_at`.
+</ParamField>
+
+<ParamField query="until" type="string (ISO 8601)">
+  Upper bound on `started_at`.
+</ParamField>
+
+<ParamField query="limit" type="integer">
+  Maximum number of tasks to return. Capped at `500`.
+</ParamField>
+
+<ParamField query="offset" type="integer">
+  Number of tasks to skip, for paging.
+</ParamField>
+
+### Example
+
+List the 20 most recent completed tasks for the `worker` session that were triggered from the queue since the start of the day:
+
+```bash
+curl -G http://localhost:3333/tasks \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  --data-urlencode "session=worker" \
+  --data-urlencode "status=completed" \
+  --data-urlencode "source=queue" \
+  --data-urlencode "since=2026-06-29T00:00:00.000Z" \
+  --data-urlencode "limit=20"
+```
+
+```json
+{
+  "tasks": [
+    {
+      "id": "daily-20260629",
+      "session": "worker",
+      "status": "completed",
+      "source": "queue",
+      "model": "claude-opus-4-8",
+      "duration_ms": 48213,
+      "files_changed": ["src/auth/session.ts", "src/auth/session.test.ts"],
+      "commands_run": ["bun test"],
+      "usage": { "inputTokens": 18422, "outputTokens": 3110 },
+      "saved_usd": 0.42,
+      "steps": [
+        {
+          "seq": 0,
+          "tool": "Read",
+          "summary": "read src/auth/session.ts",
+          "isError": false,
+          "filePath": "src/auth/session.ts"
+        },
+        {
+          "seq": 1,
+          "tool": "Edit",
+          "summary": "patch session timeout handling",
+          "isError": false,
+          "filePath": "src/auth/session.ts",
+          "detail": "@@ -12,3 +12,4 @@\n-  ttl: 3600\n+  ttl: 7200"
+        },
+        {
+          "seq": 2,
+          "tool": "Bash",
+          "summary": "bun test",
+          "isError": false,
+          "detail": "12 pass, 0 fail"
+        }
+      ]
+    }
+  ],
+  "total": 1
+}
+```
+
+## Get one task
+
+`GET /tasks/:id` returns a single task by id, including the saved response messages when they are available. Scope it with `?session=` when the same id could exist across sessions.
+
+```bash
+curl -G http://localhost:3333/tasks/daily-20260629 \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY" \
+  --data-urlencode "session=worker"
+```
+
+<Tip>
+Pass your own deterministic `id` on `/trigger` (for example `daily-20260629`) so you can read the task back later without first listing it.
+</Tip>
+
+## Get a task timeline
+
+`GET /responses/:id/timeline` returns the tool, command, and diff timeline for a task in one call: `id`, `session`, `status`, `steps`, `durationMs`, `usage`, `model`, `savedUsd`, `filesChanged`, and `commandsRun`.
+
+```bash
+curl http://localhost:3333/responses/daily-20260629/timeline \
+  -H "Authorization: Bearer $HAIFLOW_API_KEY"
+```
+
+<ResponseField name="steps" type="array">
+  The ordered tool calls, each with `seq`, `tool`, `summary`, `isError`, an optional `detail`, and `filePath`.
+</ResponseField>
+
+<ResponseField name="durationMs" type="number">
+  Wall-clock duration of the task.
+</ResponseField>
+
+<ResponseField name="usage" type="object">
+  Token usage for the run.
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  The Claude model that handled the task.
+</ResponseField>
+
+<ResponseField name="filesChanged" type="array">
+  Files the task created or modified.
+</ResponseField>
+
+<ResponseField name="commandsRun" type="array">
+  Shell commands the task executed.
+</ResponseField>
+
+<ResponseField name="savedUsd" type="number">
+  Estimated API cost avoided for the task. The response also carries `id`, `session`, and `status`.
+</ResponseField>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="History tab" icon="clock-rotate-left" href="/guides/dashboard">
+    Browse the ledger, steps, and diffs in the built-in dashboard.
+  </Card>
+  <Card title="Usage and savings" icon="piggy-bank" href="/guides/usage-and-savings">
+    See how `saved_usd` and token usage roll up into cost avoided.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    Full request and response detail for every Tasks endpoint.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Point `HAIFLOW_DATA_DIR` at a persistent directory.
+  </Card>
+</CardGroup>
