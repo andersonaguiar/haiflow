@@ -837,14 +837,50 @@ function sweepStalePromptFiles(): number {
   return removed;
 }
 
-// tmux treats `send-keys "<text>" Enter` as one paste block — Enter becomes
-// a newline inside the input instead of a submit. Splitting into two calls
-// makes Enter arrive as a keystroke after the paste is committed.
+// Text currently sitting in the TUI's input box: the region between the last
+// two horizontal border rules the input is framed by. "" if it can't be found.
+function tuiInputBox(target: string): string {
+  const pane = Bun.spawnSync(["tmux", "capture-pane", "-t", target, "-p"]);
+  if (pane.exitCode !== 0) return "";
+  const lines = pane.stdout.toString().split("\n");
+  const borders: number[] = [];
+  for (let i = 0; i < lines.length; i++) if (/^\s*[─━]{4,}/.test(lines[i])) borders.push(i);
+  if (borders.length < 2) return "";
+  return lines.slice(borders[borders.length - 2] + 1, borders[borders.length - 1]).join("\n");
+}
+
+// Has a just-typed prompt left the input box (i.e. did Enter actually submit)?
+// Submitted -> box is empty; swallowed -> our text is still parked in the box.
+function inputBoxCleared(target: string, text: string): boolean {
+  const box = tuiInputBox(target).replace(/❯/g, "").replace(/\s+/g, " ").trim();
+  if (box === "") return true;
+  const tail = text.replace(/\s+/g, " ").trim().slice(-24);
+  return tail.length === 0 ? false : !box.includes(tail);
+}
+
+// Type a prompt into the pane and submit it. The catch: the TUI needs a beat to
+// commit freshly-injected text before it will treat a following Enter as
+// "submit" rather than a literal newline. drainQueue types the next prompt the
+// instant the previous turn's Stop hook fires, so Enter routinely lands too
+// early — it gets swallowed as a newline and the prompt sits unsent in the
+// input box, the task never starts, and the caller hangs forever. (Short first
+// prompts slip under the TUI's paste threshold and submit fine, which is why
+// only longer / subsequent prompts broke.) So: settle, press Enter, then VERIFY
+// the box actually cleared; if it didn't, the submit was eaten — settle longer
+// and retry. Self-correcting, so it tolerates a slow/loaded TUI instead of
+// betting everything on one fixed delay.
 function typeThenSubmit(target: string, text: string): boolean {
   const typed = Bun.spawnSync(["tmux", "send-keys", "-t", target, "-l", text]);
   if (typed.exitCode !== 0) return false;
-  const submitted = Bun.spawnSync(["tmux", "send-keys", "-t", target, "Enter"]);
-  return submitted.exitCode === 0;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    Bun.sleepSync(attempt === 0 ? 300 : 450);
+    Bun.spawnSync(["tmux", "send-keys", "-t", target, "Enter"]);
+    Bun.sleepSync(150);
+    if (inputBoxCleared(target, text)) return true;
+  }
+  const cleared = inputBoxCleared(target, text);
+  if (!cleared) log("warn", "submit_unconfirmed", { target });
+  return cleared;
 }
 
 function isTmuxRunning(session: string): boolean {
@@ -973,8 +1009,7 @@ function injectGuardrailCommand(session: string): void {
   // Mark the session busy ourselves so a /trigger arriving before the
   // prompt hook fires won't be sent on top of the slash command.
   writeState(session, { status: "busy", since: new Date().toISOString() });
-  Bun.spawnSync(["tmux", "send-keys", "-t", target, "-l", `/${GUARDRAIL_SKILL_NAME}`]);
-  Bun.spawnSync(["tmux", "send-keys", "-t", target, "Enter"]);
+  typeThenSubmit(target, `/${GUARDRAIL_SKILL_NAME}`);
   log("info", "guardrail_command_sent", { session });
 }
 
