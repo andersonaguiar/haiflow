@@ -844,9 +844,11 @@ function tuiInputBox(target: string): string {
   if (pane.exitCode !== 0) return "";
   const lines = pane.stdout.toString().split("\n");
   const borders: number[] = [];
-  for (let i = 0; i < lines.length; i++) if (/^\s*[─━]{4,}/.test(lines[i])) borders.push(i);
-  if (borders.length < 2) return "";
-  return lines.slice(borders[borders.length - 2] + 1, borders[borders.length - 1]).join("\n");
+  for (const [i, line] of lines.entries()) if (/^\s*[─━]{4,}/.test(line)) borders.push(i);
+  const top = borders.at(-2);
+  const bottom = borders.at(-1);
+  if (top === undefined || bottom === undefined) return "";
+  return lines.slice(top + 1, bottom).join("\n");
 }
 
 // Has a just-typed prompt left the input box (i.e. did Enter actually submit)?
@@ -1027,7 +1029,15 @@ async function waitForGuardrailComplete(session: string, maxWait = 30_000): Prom
   log("warn", "guardrail_idle_timeout", { session });
 }
 
-async function startClaudeSession(session: string, cwd: string): Promise<{ success: boolean; error?: string; ready?: boolean }> {
+/**
+ * A model name is a spawn argument, not a shell string, so the risk here is a
+ * confusing failure rather than an injection. Still validated: a typo should
+ * be a 400 from us, not a Claude CLI that exits into a dead tmux pane while
+ * the caller waits out the readiness timeout.
+ */
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+async function startClaudeSession(session: string, cwd: string, model?: string): Promise<{ success: boolean; error?: string; ready?: boolean }> {
   if (isTmuxRunning(session)) {
     log("info", "session_reused", { session });
     writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
@@ -1042,11 +1052,15 @@ async function startClaudeSession(session: string, cwd: string): Promise<{ succe
     return { success: false, error: "claude CLI not found on PATH" };
   }
 
+  // Pinned per session rather than per machine: callers running different
+  // workloads through one haiflow want different models, and the alternative
+  // (a settings file in cwd) is shared by every session using that cwd.
   const result = Bun.spawnSync([
     "tmux", "new-session", "-d", "-s", tmuxName(session), "-c", cwd,
     "-e", `HAIFLOW=1`,
     "-e", `HAIFLOW_PORT=${PORT}`,
     "claude", "--permission-mode", "auto",
+    ...(model ? ["--model", model] : []),
   ]);
 
   if (result.exitCode !== 0) {
@@ -1056,6 +1070,7 @@ async function startClaudeSession(session: string, cwd: string): Promise<{ succe
 
   setSessionId(session, null);
   writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
+  if (model) log("info", "session_model_pinned", { session, model });
 
   // Block until Claude's TUI is actually interactive. The session-start hook
   // fires early in boot before the input box is mounted — hook-only checks
@@ -1342,6 +1357,10 @@ const server = Bun.serve({
         const ephemeral = body.ephemeral === true;
         const callbackUrl = typeof body.callbackUrl === "string" ? body.callbackUrl.trim() : undefined;
         const requestedCwd = typeof body.cwd === "string" ? body.cwd : undefined;
+        const requestedModel = typeof body.model === "string" ? body.model.trim() : undefined;
+        if (requestedModel && !MODEL_RE.test(requestedModel)) {
+          return Response.json({ error: "Invalid model name", session }, { status: 400 });
+        }
         if (callbackUrl) {
           const v = validateCallbackUrl(callbackUrl);
           if (!v.ok) return Response.json({ error: v.reason, session }, { status: 400 });
@@ -1370,7 +1389,7 @@ const server = Bun.serve({
           // policy as /session/start so messages and overrides stay consistent.
           const { cwd, error } = resolveStartCwd(requestedCwd);
           if (error) return Response.json({ error, session }, { status: 400 });
-          const started = await startClaudeSession(session, cwd!);
+          const started = await startClaudeSession(session, cwd!, requestedModel);
           if (!started.success) {
             return Response.json({ error: started.error, session }, { status: 503 });
           }
@@ -2173,6 +2192,10 @@ const server = Bun.serve({
         if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
         const session = sanitizeSession((body.session as string) || "default");
         const requestedCwd = body.cwd as string | undefined;
+        const model = typeof body.model === "string" ? body.model.trim() : undefined;
+        if (model && !MODEL_RE.test(model)) {
+          return Response.json({ error: "Invalid model name", session }, { status: 400 });
+        }
 
         const { cwd, error, overridden, defaulted } = resolveStartCwd(requestedCwd, { allowDefault: true });
         if (error) {
@@ -2188,13 +2211,14 @@ const server = Bun.serve({
           log("info", "session_start_cwd_defaulted", { session, cwd });
         }
 
-        const result = await startClaudeSession(session, cwd!);
+        const result = await startClaudeSession(session, cwd!, model);
         if (!result.success) {
           return Response.json({ error: result.error, session }, { status: 409 });
         }
         return Response.json({
           started: true, session, tmux: tmuxName(session), cwd,
           ready: result.ready ?? true,
+          ...(model ? { model } : {}),
           ...(overridden ? { cwdOverridden: true } : {}),
           ...(defaulted ? { cwdDefaulted: true } : {}),
         });
