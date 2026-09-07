@@ -844,9 +844,11 @@ function tuiInputBox(target: string): string {
   if (pane.exitCode !== 0) return "";
   const lines = pane.stdout.toString().split("\n");
   const borders: number[] = [];
-  for (let i = 0; i < lines.length; i++) if (/^\s*[─━]{4,}/.test(lines[i])) borders.push(i);
-  if (borders.length < 2) return "";
-  return lines.slice(borders[borders.length - 2] + 1, borders[borders.length - 1]).join("\n");
+  for (const [i, line] of lines.entries()) if (/^\s*[─━]{4,}/.test(line)) borders.push(i);
+  const top = borders.at(-2);
+  const bottom = borders.at(-1);
+  if (top === undefined || bottom === undefined) return "";
+  return lines.slice(top + 1, bottom).join("\n");
 }
 
 // Has a just-typed prompt left the input box (i.e. did Enter actually submit)?
