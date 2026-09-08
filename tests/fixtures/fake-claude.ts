@@ -94,10 +94,16 @@ async function handleSubmit(raw: string): Promise<void> {
   submitCount++;
   let payload = raw;
 
-  // Large-prompt path: haiflow writes prompts >2000 chars to a temp file and
-  // types "Read the file <path> and follow the instructions in it exactly."
-  // Mirror real Claude reading that file so big payloads are testable too.
-  const filePath = payload.match(/^Read the file (\/\S+) and follow the instructions in it exactly\.\s*$/)?.[1];
+  // Large-prompt path: haiflow writes prompts >2000 chars to a file and types
+  // a short note pointing at it. Mirror real Claude reading that file so big
+  // payloads are testable too.
+  //
+  // Matched on the PATH rather than on the sentence around it. The sentence is
+  // prose aimed at a model and it gets reworded; when it was reworded to say
+  // where the file lives relative to the session's cwd, this double silently
+  // stopped following it and echoed the note instead, which reads in CI as
+  // "the payload was lost in transport".
+  const filePath = payload.match(/(\/\S*\.haiflow-prompt-[\w-]+\.txt|\/\S*haiflow-prompt-[\w-]+\.txt)/)?.[1];
   if (filePath) {
     try {
       payload = await Bun.file(filePath).text();
