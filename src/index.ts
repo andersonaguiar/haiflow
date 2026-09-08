@@ -2221,7 +2221,11 @@ const server = Bun.serve({
         // going to come back to.
         let idleMinutes: number | undefined;
         if (body.idleMinutes !== undefined) {
-          const parsed = Number(body.idleMinutes);
+          // `null` is rejected rather than defaulted: JSON.stringify turns NaN
+          // into null, and Number(null) is 0, which would quietly mean "never
+          // expire" — the opposite of what a caller sending a broken number
+          // wanted.
+          const parsed = body.idleMinutes === null ? NaN : Number(body.idleMinutes);
           if (!Number.isFinite(parsed) || parsed < 0) {
             return Response.json({ error: "idleMinutes must be a number >= 0", session }, { status: 400 });
           }

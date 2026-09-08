@@ -19,6 +19,8 @@ const TEST_API_KEY = "test-api-key";
 const BASE = `http://localhost:${TEST_PORT}`;
 
 let server: ReturnType<typeof Bun.spawn>;
+/** Sessions this file really started, so a developer's tmux is left as found. */
+const started: string[] = [];
 const authHeaders: Record<string, string> = { Authorization: `Bearer ${TEST_API_KEY}` };
 
 const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000).toISOString();
@@ -63,7 +65,14 @@ beforeAll(async () => {
   throw new Error("Server failed to start");
 });
 
-afterAll(() => {
+afterAll(async () => {
+  for (const session of started) {
+    await fetch(`${BASE}/session/stop`, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ session }),
+    }).catch(() => {});
+  }
   server?.kill();
   // `force` because the server may have removed a session dir under us as the
   // sweep ran, and a cleanup race is not a test failure.
@@ -106,29 +115,41 @@ describe("idle session reaper", () => {
     expect(stateOf("finished-and-forgotten").status).toBe("offline");
   });
 
-  test("start accepts a per-session window and reports what it settled on", async () => {
-    const res = await fetch(`${BASE}/session/start`, {
-      method: "POST",
-      headers: { ...authHeaders, "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "bad-window", cwd: TEST_DIR, idleMinutes: -1 }),
-    });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("idleMinutes");
-
-    const ok = await fetch(`${BASE}/session/start`, {
-      method: "POST",
-      headers: { ...authHeaders, "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "kept-forever", cwd: TEST_DIR, idleMinutes: 0 }),
-    });
-    expect(ok.status).toBe(200);
-    // The caller is told which window it actually got, rather than having to
-    // know the host's default.
-    expect((await ok.json()).idleMinutes).toBe(0);
-    expect(stateOf("kept-forever").idleMinutes).toBe(0);
+  // Rejected before anything is started, so this is the same answer with or
+  // without tmux on the machine.
+  test("refuses a window that is not a number of minutes", async () => {
+    // NaN is in the list because JSON.stringify writes it as null, and
+    // Number(null) is 0 — which would have meant "never expire".
+    for (const idleMinutes of [-1, "soon", NaN, null]) {
+      const res = await fetch(`${BASE}/session/start`, {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "bad-window", cwd: TEST_DIR, idleMinutes }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toContain("idleMinutes");
+    }
   });
 
-  test("the host default is reported so a caller can see what it got", async () => {
-    const res = await fetch(`${BASE}/health`);
-    expect(res.ok).toBe(true);
-  });
+  // CI has no tmux or claude on purpose, so starting a session fails fast with
+  // 409 there and succeeds with 200 on a developer's machine. Either way the
+  // value was accepted rather than rejected, which is what this asserts; that
+  // the window then governs the sweep is covered by the seeded cases above.
+  test("accepts a valid window, including nought for never", async () => {
+    for (const idleMinutes of [0, 45]) {
+      const res = await fetch(`${BASE}/session/start`, {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ session: `window-${idleMinutes}`, cwd: TEST_DIR, idleMinutes }),
+      });
+      expect([200, 409]).toContain(res.status);
+      // On a machine that can start one, the caller is told which window it
+      // actually got rather than having to know the host's default.
+      if (res.status === 200) {
+        expect((await res.json()).idleMinutes).toBe(idleMinutes);
+        expect(stateOf(`window-${idleMinutes}`).idleMinutes).toBe(idleMinutes);
+        started.push(`window-${idleMinutes}`);
+      }
+    }
+  }, 30_000);
 });
