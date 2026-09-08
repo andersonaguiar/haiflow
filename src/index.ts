@@ -110,6 +110,23 @@ const CALLBACK_ALLOW_HOSTS = (process.env.HAIFLOW_CALLBACK_ALLOW_HOSTS ?? "")
 const TASK_TIMEOUT_SEC = Number(process.env.HAIFLOW_TASK_TIMEOUT_SEC ?? 0) || 0;
 const WAITING_GRACE_MS = (Number(process.env.HAIFLOW_WAITING_GRACE_SEC ?? 120) || 120) * 1000;
 const WATCHDOG_RECOVER = (process.env.HAIFLOW_WATCHDOG_RECOVER ?? "false").toLowerCase() === "true";
+// Kill a session that has sat idle this long. A session is a Claude Code
+// process under tmux — measured at ~350MB — so a caller that starts sessions
+// and forgets to stop them will exhaust the host, and haiflow had nothing to
+// stop that happening: the watchdog only touches sessions that are BUSY and
+// wedged, and /sessions/prune only removes the state directory of a session
+// that is already dead.
+//
+// Idle means finished: not busy, not waiting on input, queue empty. A session
+// that wants to outlive that says so, either with HAIFLOW_SESSION_IDLE_MIN=0
+// for the whole host or `idleMinutes: 0` on the session it starts.
+const SESSION_IDLE_MIN = (() => {
+  const raw = process.env.HAIFLOW_SESSION_IDLE_MIN;
+  if (raw === undefined) return 10;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 10;
+})();
+
 // How often the watchdog scans for wedged sessions and reaps timed-out map runs.
 // Configurable mainly so tests can speed it up; 15s is plenty in production.
 const WATCHDOG_INTERVAL_MS = Number(process.env.HAIFLOW_WATCHDOG_INTERVAL_MS ?? 15_000) || 15_000;
@@ -317,6 +334,9 @@ interface State {
   // Set while a human holds the wheel via the writable terminal, so auto-drain
   // doesn't fire a queued prompt on top of their typing.
   intervened?: boolean;
+  // Minutes this session may sit idle before it is stopped. Absent means the
+  // host default (HAIFLOW_SESSION_IDLE_MIN); 0 means never.
+  idleMinutes?: number;
 }
 
 interface QueueItem {
@@ -2196,6 +2216,17 @@ const server = Bun.serve({
         if (model && !MODEL_RE.test(model)) {
           return Response.json({ error: "Invalid model name", session }, { status: 400 });
         }
+        // How long this session may sit idle before haiflow stops it. Omitted
+        // means the host default; 0 means never, for a session a human is
+        // going to come back to.
+        let idleMinutes: number | undefined;
+        if (body.idleMinutes !== undefined) {
+          const parsed = Number(body.idleMinutes);
+          if (!Number.isFinite(parsed) || parsed < 0) {
+            return Response.json({ error: "idleMinutes must be a number >= 0", session }, { status: 400 });
+          }
+          idleMinutes = parsed;
+        }
 
         const { cwd, error, overridden, defaulted } = resolveStartCwd(requestedCwd, { allowDefault: true });
         if (error) {
@@ -2215,9 +2246,11 @@ const server = Bun.serve({
         if (!result.success) {
           return Response.json({ error: result.error, session }, { status: 409 });
         }
+        if (idleMinutes !== undefined) writeState(session, { idleMinutes });
         return Response.json({
           started: true, session, tmux: tmuxName(session), cwd,
           ready: result.ready ?? true,
+          idleMinutes: idleMinutes ?? SESSION_IDLE_MIN,
           ...(model ? { model } : {}),
           ...(overridden ? { cwdOverridden: true } : {}),
           ...(defaulted ? { cwdDefaulted: true } : {}),
@@ -2576,8 +2609,46 @@ const watchdogTimer = setInterval(() => {
     log("info", "watchdog_recovered", { session, reason, taskId: state.currentTaskId });
   }
 
-  // Time out stuck map runs (a shard never returned) and reap old finished ones.
   const nowMs = Date.now();
+
+  // Stop sessions that finished and were never stopped.
+  //
+  // Every one is a Claude Code process holding its context in memory, and
+  // nothing else in haiflow reclaims them: the block above only touches BUSY
+  // sessions that are wedged, and /sessions/prune only tidies the state
+  // directory of a session whose tmux is already gone. A caller that starts
+  // sessions and forgets to stop them takes the host down, and the host is
+  // usually shared with whatever else that caller runs.
+  //
+  // Deliberately narrow about what counts as finished: idle, not waiting on
+  // input, nothing queued. A session mid-task, or blocked on a permission
+  // prompt someone is about to answer, is never touched.
+  for (const { session, status } of listSessions()) {
+    if (status !== "idle") continue;
+    const state = readState(session);
+    const minutes = state.idleMinutes ?? SESSION_IDLE_MIN;
+    if (!minutes) continue; // 0 = this session outlives the sweep
+    if (state.waiting || state.queueLength > 0) continue;
+    const since = Date.parse(state.since ?? "");
+    if (!Number.isFinite(since) || nowMs - since < minutes * 60_000) continue;
+    const idleMin = Math.round((nowMs - since) / 60_000);
+
+    // Its tmux is already gone, so there is nothing to stop — but the state
+    // still says "idle", which is a lie every caller reads. Correct it.
+    if (!isTmuxRunning(session)) {
+      writeState(session, { status: "offline", since: new Date().toISOString() });
+      log("info", "session_marked_offline", { session, idleMinutes: idleMin, reason: "tmux gone" });
+      continue;
+    }
+
+    const result = stopClaudeSession(session);
+    log(result.success ? "info" : "warn", "session_reaped_idle", {
+      session, idleMinutes: idleMin, limit: minutes,
+      ...(result.success ? {} : { error: result.error }),
+    });
+  }
+
+  // Time out stuck map runs (a shard never returned) and reap old finished ones.
   for (const [id, run] of mapRuns) {
     if (!run.reduced && nowMs - run.createdAt > MAP_TIMEOUT_MS) finishMapRun(run, true);
     else if (run.reduced && nowMs - run.createdAt > MAP_TIMEOUT_MS + 3_600_000) mapRuns.delete(id);

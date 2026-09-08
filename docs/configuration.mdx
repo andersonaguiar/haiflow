@@ -39,6 +39,7 @@ In `production` mode haiflow fails closed at boot: it refuses to start on an ins
 | `HAIFLOW_ALLOW_REQUEST_CWD` | `true` | When `false`, `/session/start` rejects requests that set their own `cwd`. `HAIFLOW_CWD` must then be set server-side. |
 | `HAIFLOW_START_READY_TIMEOUT_MS` | `15000` | How long `/session/start` waits for the `SessionStart` hook to link a Claude session id before failing. A session that never links would silently drop every response (usually means hooks are not wired). |
 | `HAIFLOW_SESSION_TTL_HOURS` | `24` | Default age above which `POST /sessions/prune` reaps an offline session's state directory. |
+| `HAIFLOW_SESSION_IDLE_MIN` | `10` | Minutes a **finished** session may sit before haiflow stops it. Each session is a Claude Code process holding its context, so a caller that forgets to stop them fills the host. Only sessions that are idle, not waiting on input and with an empty queue are touched; busy and wedged sessions are the watchdog's business. Set `0` to keep every session until it is stopped explicitly, or pass `idleMinutes` on `POST /session/start` to decide per session. |
 
 <Note>
 `cwd` is optional on `POST /session/start`. When a caller omits it, haiflow uses `HAIFLOW_CWD` if pinned, otherwise it falls back to `/tmp` (a neutral scratch dir, so a bare start never runs in or exposes wherever the server was launched). Set `HAIFLOW_CWD` or pass `cwd` to run in a real project.
