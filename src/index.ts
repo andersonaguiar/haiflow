@@ -1070,6 +1070,10 @@ async function startClaudeSession(session: string, cwd: string, model?: string, 
     "tmux", "new-session", "-d", "-s", tmuxName(session), "-c", cwd,
     "-e", `HAIFLOW=1`,
     "-e", `HAIFLOW_PORT=${PORT}`,
+    // Which session this is, so its hooks can say so. Without it the
+    // SessionStart handler has nothing to match on and falls back to picking
+    // the first unlinked session it finds, which is a guess.
+    "-e", `HAIFLOW_SESSION=${session}`,
     "claude", "--permission-mode", "auto",
     ...(model ? ["--model", model] : []),
     // Reasoning effort is a per-workload choice, not a per-machine one: a
@@ -2015,11 +2019,29 @@ const server = Bun.serve({
         const claudeId = body.session_id;
         let session = findSessionByClaudeId(claudeId);
 
+        // The session told us who it is. Claude's own session_id is unknown to
+        // us on a first event, so this is the only thing that actually
+        // identifies the sender.
+        if (!session) {
+          const declared = req.headers.get("x-haiflow-session");
+          if (declared) {
+            const named = sanitizeSession(declared);
+            if (isTmuxRunning(named)) session = named;
+          }
+        }
+
+        // Older sessions, started before the env var existed, send no header.
+        // Guessing is what this fallback is: it takes the first session with
+        // no Claude id and a live tmux, which is the wrong one whenever more
+        // than one is unlinked. The loser is never linked, the watchdog calls
+        // it `session_start_unlinked` fifteen seconds later, kills it, and the
+        // caller gets a 409 for a session that was starting perfectly well.
         if (!session) {
           const sessions = listSessions();
           for (const s of sessions) {
             if (!getSessionId(s.session) && isTmuxRunning(s.session)) {
               session = s.session;
+              log("warn", "hook_session_guessed", { session: s.session, claudeId });
               break;
             }
           }

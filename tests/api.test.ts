@@ -464,6 +464,54 @@ describe("POST /hooks/session-start", () => {
     });
     expect(data.ok).toBe(true);
   });
+
+  // Claude's session_id means nothing to us on a first event, so without the
+  // header the handler falls back to picking the first unlinked session with a
+  // live tmux. With two starting at once that is a coin flip: the loser is
+  // never linked, the watchdog calls it `session_start_unlinked` fifteen
+  // seconds later, kills it, and the caller gets a 409 for a session that was
+  // starting perfectly well. The session now says which one it is.
+  test("takes the session from the header rather than guessing", async () => {
+    const res = await fetch(`${BASE}/hooks/session-start`, {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        "Content-Type": "application/json",
+        "X-Haiflow-Session": "declared-session",
+      },
+      body: JSON.stringify({ session_id: "claude-abc" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  test("still answers when the header names a session with no tmux", async () => {
+    const res = await fetch(`${BASE}/hooks/session-start`, {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        "Content-Type": "application/json",
+        "X-Haiflow-Session": "no-such-session",
+      },
+      body: JSON.stringify({ session_id: "claude-def" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  // A name off the wire reaches the state directory, so it is sanitised like
+  // every other session name rather than trusted.
+  test("does not let a header escape the session directory", async () => {
+    const res = await fetch(`${BASE}/hooks/session-start`, {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        "Content-Type": "application/json",
+        "X-Haiflow-Session": "../../etc/passwd",
+      },
+      body: JSON.stringify({ session_id: "claude-ghi" }),
+    });
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("POST /hooks/prompt", () => {
