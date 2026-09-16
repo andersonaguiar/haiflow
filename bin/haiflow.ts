@@ -88,6 +88,9 @@ async function setup() {
     SessionStart: `${HOOKS_DIR}/session-start.sh`,
     UserPromptSubmit: `${HOOKS_DIR}/prompt.sh`,
     Stop: `${HOOKS_DIR}/stop.sh`,
+    // Fires instead of Stop when an API error (expired login, rate limit)
+    // ends the turn. Without it the session never leaves "busy".
+    StopFailure: `${HOOKS_DIR}/stop-failure.sh`,
     SessionEnd: `${HOOKS_DIR}/session-end.sh`,
     Notification: `${HOOKS_DIR}/notification.sh`,
   };

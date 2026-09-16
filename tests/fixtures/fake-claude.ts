@@ -128,7 +128,18 @@ async function handleSubmit(raw: string): Promise<void> {
 
   const lineCount = payload.split("\n").length;
 
-  if (useTranscript) {
+  // Test hook: a cwd ending in "authfail" or "ratelimit" makes every turn end
+  // on an API error, the way real Claude does with an expired login or a rate
+  // limit: StopFailure fires INSTEAD of Stop, never alongside it.
+  const failure = process.cwd().endsWith("authfail")
+    ? { error: "authentication_failed", last_assistant_message: "Login expired · Please run /login" }
+    : process.cwd().endsWith("ratelimit")
+      ? { error: "rate_limit", last_assistant_message: "API Error: Rate limit reached" }
+      : null;
+
+  if (failure) {
+    await postHook("/hooks/stop-failure", { session_id: SESSION_ID, ...failure });
+  } else if (useTranscript) {
     const transcriptReply = `TRANSCRIPT-SOURCED lines=${lineCount}\n<<<PAYLOAD\n${payload}\nPAYLOAD>>>`;
     const transcriptPath = await writeTranscript(payload, transcriptReply);
     await postHook("/hooks/stop", {

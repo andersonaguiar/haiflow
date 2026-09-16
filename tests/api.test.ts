@@ -939,7 +939,7 @@ describe("hook localhost restriction", () => {
   test("blocks all hook endpoints through proxy", async () => {
     const proxyHeaders = { "Content-Type": "application/json", "CF-Connecting-IP": "1.2.3.4" };
 
-    for (const path of ["/hooks/session-start", "/hooks/prompt", "/hooks/stop", "/hooks/session-end"]) {
+    for (const path of ["/hooks/session-start", "/hooks/prompt", "/hooks/stop", "/hooks/stop-failure", "/hooks/session-end"]) {
       const res = await fetch(`${BASE}${path}`, {
         method: "POST",
         headers: proxyHeaders,

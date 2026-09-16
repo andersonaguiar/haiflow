@@ -123,6 +123,8 @@ The two options are independent — use one, both, or neither.
   }
   ```
 
+  If the task ends on an API error instead (an expired Claude login, a rate limit), the same URL receives `"event": "task.failed"` with `"status": "failed"`, an `error` code such as `authentication_failed` or `rate_limit`, and `messages` holding a one-line description of the failure.
+
   `messages` are redacted by the same egress pass as every other outbound payload. Delivery is best-effort (a failed POST is logged, never retried inline, and never blocks the session).
 
   Because an arbitrary callback URL is an SSRF surface, this is **off by default**. Enable it with `HAIFLOW_ALLOW_TRIGGER_CALLBACK=true`, and optionally restrict targets with `HAIFLOW_CALLBACK_ALLOW_HOSTS=host1,host2`. With callbacks disabled, a `callbackUrl` returns `400`.

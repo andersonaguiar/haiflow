@@ -66,6 +66,8 @@ When you set `ephemeral`, the trigger response echoes back the flags that apply 
 }
 ```
 
+If the task ends on an API error instead (an expired Claude login, a rate limit), the same URL receives `"event": "task.failed"` with `"status": "failed"`, an `error` code such as `authentication_failed` or `rate_limit`, and `messages` holding a one-line description of the failure.
+
 The `messages` field is redacted by the same egress pass that scrubs every other outbound payload, so a callback never leaks more than your normal responses do. See [Context management](/concepts/context-management) for what that egress pass covers.
 
 Delivery is best-effort. A failed POST is logged, never retried inline, and never blocks the session. Treat the callback as a notification, not a guaranteed-once delivery channel: if your endpoint must not miss results, have it acknowledge receipt and reconcile against the [API](/api-reference/introduction) for anything it did not see.

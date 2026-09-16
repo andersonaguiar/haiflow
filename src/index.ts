@@ -317,7 +317,17 @@ interface State {
   // Set while a human holds the wheel via the writable terminal, so auto-drain
   // doesn't fire a queued prompt on top of their typing.
   intervened?: boolean;
+  // The API error that ended the last turn (StopFailure hook), cleared by the
+  // next clean Stop. It is why a session is up yet nothing it runs succeeds.
+  lastFailure?: { error: string; message?: string; at: string };
 }
+
+// StopFailure errors no retry will fix: every later turn in the session fails
+// the same way until someone logs in again, pays, or picks a valid model.
+const UNRECOVERABLE_TURN_ERRORS = new Set([
+  "authentication_failed", "oauth_org_not_allowed", "account_on_hold",
+  "verification_required", "billing_error", "model_not_found", "cloud_credential_error",
+]);
 
 interface QueueItem {
   id: string;
@@ -530,13 +540,15 @@ async function fireTriggerCallback(
   url: string, session: string, taskId: string,
   saved: { messages: string[]; completed_at: string },
   model: string | null, usage: TaskUsage | null,
+  error?: string,
 ) {
   try {
     const payload = {
-      event: "task.completed",
+      event: error ? "task.failed" : "task.completed",
       id: taskId,
       session,
-      status: "completed",
+      status: error ? "failed" : "completed",
+      ...(error ? { error } : {}),
       messages: saved.messages,
       model,
       usage,
@@ -989,6 +1001,35 @@ function drainQueue(session: string) {
   log("info", "queue_drained", { session, taskId: next.id, remaining: queue.length });
 }
 
+// A turn is over, whether Stop or StopFailure ended it: return the session to
+// idle, then either tear down an ephemeral session or hand it the next task.
+function endTurn(session: string, state: State, updates: Partial<Omit<State, "queueLength" | "session">> = {}) {
+  writeState(session, {
+    status: "idle", since: new Date().toISOString(),
+    waiting: false, waitingMessage: undefined, waitingSince: undefined, deadlineAt: undefined,
+    currentCallbackUrl: undefined, currentEphemeral: undefined,
+    ...updates,
+  });
+
+  // Fire-and-forget: if the finished task asked for an ephemeral session
+  // and nothing else is queued, stop it. The hook request is made by a
+  // curl child of the Claude session we're about to kill, so killing it
+  // inline would tear down the very connection we're responding on (and
+  // segfaults the runtime). setImmediate runs the teardown on the next
+  // event-loop iteration — after this response has been written — so the
+  // hook gets its reply before its sender is killed. (No timed delay: the
+  // teardown is sequenced after the response, not after a fixed wait.)
+  if (state.currentEphemeral && readQueue(session).length === 0) {
+    const taskId = state.currentTaskId;
+    setImmediate(() => {
+      stopClaudeSession(session);
+      log("info", "ephemeral_session_stopped", { session, taskId });
+    });
+  } else {
+    drainQueue(session);
+  }
+}
+
 function installGuardrailSkill(): void {
   if (!ENABLE_GUARDRAILS) return;
   const home = process.env.HOME;
@@ -1020,12 +1061,14 @@ function injectGuardrailCommand(session: string): void {
   const target = tmuxName(session);
   // Mark the session busy ourselves so a /trigger arriving before the
   // prompt hook fires won't be sent on top of the slash command.
-  writeState(session, { status: "busy", since: new Date().toISOString() });
+  writeState(session, { status: "busy", since: new Date().toISOString(), lastFailure: undefined });
   typeThenSubmit(target, `/${GUARDRAIL_SKILL_NAME}`);
   log("info", "guardrail_command_sent", { session });
 }
 
-async function waitForGuardrailComplete(session: string, maxWait = 30_000): Promise<void> {
+// Resolves with the error that ended the guardrail turn, if one did. That turn
+// is the session's first real API call, so it is where an expired login shows.
+async function waitForGuardrailComplete(session: string, maxWait = 30_000): Promise<State["lastFailure"]> {
   if (!ENABLE_GUARDRAILS) return;
   // Give the prompt hook time to transition state to busy (if our manual
   // mark above was already overwritten) before we start polling for idle.
@@ -1033,10 +1076,20 @@ async function waitForGuardrailComplete(session: string, maxWait = 30_000): Prom
   const start = Date.now();
   while (Date.now() - start < maxWait) {
     const state = readState(session);
-    if (state.status === "idle") return;
+    if (state.status === "idle") return state.lastFailure;
     await Bun.sleep(200);
   }
   log("warn", "guardrail_idle_timeout", { session });
+}
+
+// A session whose first turn failed for good is not a started session: stop
+// it and say why, rather than report success and let every trigger fail.
+async function settleGuardrail(session: string): Promise<string | undefined> {
+  const failure = await waitForGuardrailComplete(session);
+  if (!failure || !UNRECOVERABLE_TURN_ERRORS.has(failure.error)) return;
+  log("error", "session_start_failed", { session, error: failure.error, message: failure.message });
+  stopClaudeSession(session);
+  return `Claude cannot run in this session: ${failure.error}${failure.message ? ` (${failure.message})` : ""}`;
 }
 
 /**
@@ -1088,7 +1141,7 @@ async function startClaudeSession(session: string, cwd: string, model?: string, 
   }
 
   setSessionId(session, null);
-  writeState(session, { status: "idle", since: new Date().toISOString(), cwd });
+  writeState(session, { status: "idle", since: new Date().toISOString(), cwd, lastFailure: undefined });
   if (model || effort) log("info", "session_model_pinned", { session, model, effort });
 
   // Block until Claude's TUI is actually interactive. The session-start hook
@@ -1100,7 +1153,8 @@ async function startClaudeSession(session: string, cwd: string, model?: string, 
     if (getSessionId(session) && isTuiInteractive(target)) {
       log("info", "session_started", { session, cwd, readyMs: Date.now() - start });
       injectGuardrailCommand(session);
-      await waitForGuardrailComplete(session);
+      const error = await settleGuardrail(session);
+      if (error) return { success: false, error };
       return { success: true, ready: true };
     }
     await Bun.sleep(100);
@@ -1122,7 +1176,8 @@ async function startClaudeSession(session: string, cwd: string, model?: string, 
 
   log("warn", "session_started", { session, cwd, ready: false, note: "linked but TUI readiness unconfirmed — proceeding" });
   injectGuardrailCommand(session);
-  await waitForGuardrailComplete(session);
+  const error = await settleGuardrail(session);
+  if (error) return { success: false, error };
   return { success: true, ready: false };
 }
 
@@ -1327,6 +1382,8 @@ const server = Bun.serve({
           const state = readState(session);
           const tmuxRunning = isTmuxRunning(session);
           const hooksLinked = !!getSessionId(session);
+          const failure = tmuxRunning ? state.lastFailure : undefined;
+          const failedForGood = !!failure && UNRECOVERABLE_TURN_ERRORS.has(failure.error);
           return {
             session,
             status: state.status,
@@ -1334,10 +1391,13 @@ const server = Bun.serve({
             cwd: state.cwd,
             tmuxRunning,
             hooksLinked,
-            healthy: !tmuxRunning || hooksLinked,
+            healthy: (!tmuxRunning || hooksLinked) && !failedForGood,
             note: tmuxRunning && !hooksLinked
               ? "tmux is running but no Claude session-id is linked — the SessionStart hook never fired. Run `haiflow setup` and restart the session."
-              : undefined,
+              : failure
+                ? `last turn failed: ${failure.error}${failure.message ? ` (${failure.message})` : ""}`
+                : undefined,
+            ...(failure ? { lastFailure: failure } : {}),
             queueLength: state.queueLength,
           };
         };
@@ -2146,31 +2206,45 @@ const server = Bun.serve({
           }
         }
 
-        writeState(session, {
-          status: "idle", since: new Date().toISOString(),
-          waiting: false, waitingMessage: undefined, waitingSince: undefined, deadlineAt: undefined,
-          currentCallbackUrl: undefined, currentEphemeral: undefined,
-        });
-
-        // Fire-and-forget: if the finished task asked for an ephemeral session
-        // and nothing else is queued, stop it. The Stop hook request is made by a
-        // curl child of the Claude session we're about to kill, so killing it
-        // inline would tear down the very connection we're responding on (and
-        // segfaults the runtime). setImmediate runs the teardown on the next
-        // event-loop iteration — after this response has been written — so the
-        // hook gets its reply before its sender is killed. (No timed delay: the
-        // teardown is sequenced after the response, not after a fixed wait.)
-        if (state.currentEphemeral && readQueue(session).length === 0) {
-          const ephemeralSession = session;
-          const ephemeralTaskId = state.currentTaskId;
-          setImmediate(() => {
-            stopClaudeSession(ephemeralSession);
-            log("info", "ephemeral_session_stopped", { session: ephemeralSession, taskId: ephemeralTaskId });
-          });
-        } else {
-          drainQueue(session);
-        }
+        endTurn(session, state, { lastFailure: undefined });
         log("info", "hook_stop", { session, taskId: state.currentTaskId });
+
+        return Response.json({ ok: true });
+      },
+    },
+
+    // Claude fires StopFailure instead of Stop when an API error ends the turn
+    // (expired login, rate limit, billing). No Stop ever follows, so without
+    // this the session sits "busy" forever and its queue never drains.
+    "/hooks/stop-failure": {
+      POST: async (req) => {
+        const err = requireLocalhost(req);
+        if (err) return err;
+        const body = await readJson(req);
+        if (!body) return Response.json({ error: "Invalid or empty JSON body" }, { status: 400 });
+        const session = findSessionByClaudeId(body.session_id);
+        if (!session) return Response.json({ ok: true });
+
+        const state = readState(session);
+        const error = typeof body.error === "string" ? body.error.slice(0, 100) : "unknown";
+        const message = [body.error_details, body.last_assistant_message]
+          .find((v): v is string => typeof v === "string" && v.length > 0)
+          ?.slice(0, 500);
+
+        if (state.currentTaskId) {
+          const taskId = state.currentTaskId;
+          const text = `[haiflow] task failed: ${error}${message ? ` (${message})` : ""}`;
+          const saved = saveResponse(session, taskId, state.currentPrompt, undefined, text);
+          recordTaskFinish({ id: taskId, session, status: "failed", error: message ? `${error}: ${message}` : error });
+          collectMapResult(taskId, saved?.messages[0] ?? text);
+          if (state.currentCallbackUrl && saved) {
+            const callbackUrl = state.currentCallbackUrl;
+            setImmediate(() => fireTriggerCallback(callbackUrl, session, taskId, saved, null, null, error));
+          }
+        }
+
+        endTurn(session, state, { lastFailure: { error, message, at: new Date().toISOString() } });
+        log("warn", "hook_stop_failure", { session, taskId: state.currentTaskId, error, message });
 
         return Response.json({ ok: true });
       },

@@ -70,7 +70,7 @@ haiflow uses [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/
 haiflow setup     # or: bun run setup
 ```
 
-This registers five hooks: `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`, and `Notification`. They are thin HTTP forwarders that POST Claude Code events to the haiflow server. If the server is not running, they silently no-op, and they never interfere with non-orchestrated Claude sessions (the server ignores unknown session ids).
+This registers six hooks: `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd`, and `Notification`. After upgrading haiflow, run `haiflow setup` again so hooks added since your last install get registered. They are thin HTTP forwarders that POST Claude Code events to the haiflow server. If the server is not running, they silently no-op, and they never interfere with non-orchestrated Claude sessions (the server ignores unknown session ids).
 
 <Warning>
 Hooks are the number-one silent failure. If they are not wired, `/session/start` returns `409`, sessions sit busy forever, and responses are never captured. After upgrading, run `haiflow setup` again to pick up new hooks (for example the `Notification` hook added for the watchdog).

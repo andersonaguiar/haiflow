@@ -501,7 +501,9 @@ haiflow/
 │   ├── session-start.sh      # SessionStart hook
 │   ├── prompt.sh             # UserPromptSubmit hook
 │   ├── stop.sh               # Stop hook
-│   └── session-end.sh        # SessionEnd hook
+│   ├── stop-failure.sh       # StopFailure hook
+│   ├── session-end.sh        # SessionEnd hook
+│   └── notification.sh       # Notification hook
 ├── examples/
 │   └── chained-calc/         # Chained calc workflow (n8n steps + pipeline config)
 ├── assets/

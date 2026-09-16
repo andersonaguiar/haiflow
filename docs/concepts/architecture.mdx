@@ -71,7 +71,7 @@ curl -N http://localhost:3333/responses/$TASK_ID/stream \
 
 ## Hooks
 
-haiflow's design rests on [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code). The `haiflow setup` step registers five hooks into `~/.claude/settings.json`. Each one POSTs an event to the server at `POST /hooks/*`.
+haiflow's design rests on [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code). The `haiflow setup` step registers six hooks into `~/.claude/settings.json`. Each one POSTs an event to the server at `POST /hooks/*`.
 
 The hooks are thin HTTP forwarders, which keeps them safe to leave installed:
 
@@ -89,6 +89,7 @@ The `/hooks/*` endpoints are restricted to localhost. Hooks run on the same mach
 | `SessionStart` | Links the Claude session id to the haiflow session. This enables capture. |
 | `UserPromptSubmit` | Records the prompt. |
 | `Stop` | Signals task completion. Triggers response capture, the ledger write, and any [pipeline](/guides/pipelines) emit. |
+| `StopFailure` | Fires instead of `Stop` when an API error (expired login, rate limit, billing) ends the turn. Fails the running task, frees the session, and records the error as `lastFailure`. If the session's first turn fails this way for a reason a retry will not fix, `POST /session/start` returns `409` with the error. |
 | `SessionEnd` | Marks the session offline. |
 | `Notification` | Flags a session as waiting when Claude is blocked needing input mid-task. The watchdog watches this. |
 
