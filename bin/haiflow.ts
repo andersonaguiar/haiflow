@@ -101,7 +101,7 @@ async function setup() {
 
     const existing: any[] = settings.hooks[event] ?? [];
     const alreadyInstalled = existing.some((e: any) =>
-      e.hooks?.some((h: any) => h.command?.includes("/haiflow/") || h.command?.includes("/hooks/"))
+      e.hooks?.some((h: any) => h.command === script)
     );
 
     if (!alreadyInstalled) {
