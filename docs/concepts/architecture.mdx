@@ -18,7 +18,7 @@ haiflow turns the local `claude` CLI into an HTTP service. It does this without 
 | Task ledger | A durable SQLite database (`haiflow.db`) that records what each task actually did. |
 | Redis (optional) | Backs [pipeline](/guides/pipelines) persistence when you chain agents with pub/sub. |
 
-Each haiflow session maps to exactly one `tmux` session running one `claude` process. Sessions are independent, so you can run many in parallel and fan work across them with [worker pools](/guides/worker-pools).
+Each haiflow session maps to exactly one `tmux` session running one `claude` process. Sessions are independent, so you can run many in parallel.
 
 ## Request-to-response lifecycle
 

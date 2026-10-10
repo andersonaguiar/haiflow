@@ -4,9 +4,9 @@ description: "Run Claude Code as a headless AI agent over HTTP, on your existing
 icon: "hexagon"
 ---
 
-**haiflow** (**h**ooks · **ai** · **flow**) is an HTTP orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It wraps Claude Code in `tmux` sessions and exposes a REST API so you can trigger prompts, queue work, stream responses, fan work across worker pools, and chain agents together, all from any HTTP client.
+**haiflow** (**h**ooks · **ai** · **flow**) is an HTTP orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It wraps Claude Code in `tmux` sessions and exposes a REST API so you can trigger prompts, queue work, stream responses, and chain agents together, all from any HTTP client.
 
-Anything you can do in Claude Code (code generation, refactoring, bug triage, daily reports) you can automate over HTTP with n8n, cron, webhooks, or any tool that can make a request.
+Anything you can do in Claude Code (code generation, refactoring, bug triage, daily reports) you can automate over HTTP with cron, webhooks, or any tool that can make a request.
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
@@ -31,8 +31,8 @@ Anything you can do in Claude Code (code generation, refactoring, bug triage, da
 
 - **No per-token costs.** Tasks run on your flat Claude Code subscription. haiflow even reports the API cost you avoided (see [Usage & savings](/guides/usage-and-savings)).
 - **Full agent capability.** File access, shell, `git`, `gh`, and your skills, not just text completion.
-- **Drive it from anywhere.** A plain REST API plus a built-in [dashboard](/guides/dashboard), an [MCP server](/integrations/mcp), [n8n nodes](/integrations/n8n), a [CLI](/guides/cli), and a [GitHub bridge](/guides/github-bridge).
-- **Built for automation.** A FIFO queue with priority, dedup, scheduling, fire-and-forget jobs, worker pools, map-reduce, and event pipelines.
+- **Drive it from anywhere.** A plain REST API plus a built-in [dashboard](/guides/dashboard), an [MCP server](/integrations/mcp), and a [CLI](/guides/cli).
+- **Built for automation.** A FIFO queue with priority, dedup, scheduling, fire-and-forget jobs, and event pipelines.
 
 ## How it works
 
@@ -66,9 +66,6 @@ Read the full breakdown in [Architecture](/concepts/architecture).
 ## What you can build
 
 <CardGroup cols={2}>
-  <Card title="Worker pools & map-reduce" icon="layer-group" href="/guides/worker-pools">
-    Fan 40 files across a pool of review agents and reduce to one report, for no extra per-token cost.
-  </Card>
   <Card title="Agent pipelines" icon="share-nodes" href="/guides/pipelines">
     A design agent emits an event, a developer agent picks it up, a reviewer follows, all decoupled.
   </Card>

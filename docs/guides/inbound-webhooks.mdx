@@ -39,7 +39,7 @@ Recipes live in `ingest.json` inside `HAIFLOW_DATA_DIR`. Each top-level key is a
 {
   "github": {
     "scheme": "github",
-    "secret": "env:GITHUB_WEBHOOK_SECRET",
+    "secret": "env:INGEST_GITHUB_SECRET",
     "target": "trigger",
     "session": "worker",
     "fields": {
@@ -76,7 +76,7 @@ The `github` recipe verifies the GitHub signature, renders the issue into a prom
 | `instruction` | The trusted, operator-defined instruction. It is placed outside the untrusted data block. |
 
 <Tip>
-  Use `env:VAR_NAME` for `secret` so the signing secret stays in the environment and never lands in `ingest.json`. The `github` scheme reuses the same `GITHUB_WEBHOOK_SECRET` you set for the [GitHub bridge](/guides/github-bridge).
+  Use `env:VAR_NAME` for `secret` so the signing secret stays in the environment and never lands in `ingest.json`.
 </Tip>
 
 ## Trusted instruction, untrusted data
@@ -117,7 +117,7 @@ Here is a raw GitHub `issues` payload posted to `POST /ingest/github`. The `X-Hu
 BODY='{"action":"opened","issue":{"title":"Login button is misaligned","body":"On mobile the login button overflows its container."}}'
 
 # Compute the signature over the exact raw bytes with your webhook secret.
-SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$GITHUB_WEBHOOK_SECRET" | sed 's/^.* //')"
+SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$INGEST_GITHUB_SECRET" | sed 's/^.* //')"
 
 curl -X POST http://localhost:3333/ingest/github \
   -H "Content-Type: application/json" \
@@ -136,9 +136,6 @@ A real provider signs the body for you. The `curl` above signs it by hand so you
 <CardGroup cols={2}>
   <Card title="Pipelines" icon="diagram-project" href="/guides/pipelines">
     Route a `publish` recipe into a topic and chain agents from the event.
-  </Card>
-  <Card title="GitHub bridge" icon="github" href="/guides/github-bridge">
-    A turnkey path for driving Claude from GitHub comments.
   </Card>
   <Card title="Configuration" icon="gear" href="/configuration">
     Every `HAIFLOW_INGEST_*` variable and its default.

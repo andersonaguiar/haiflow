@@ -49,11 +49,10 @@ No agent knows about any other agent. They only know which topics they emit and 
 
 ## Configuration
 
-Pipelines are defined in `pipeline.json`, which lives in `HAIFLOW_DATA_DIR` (default `/tmp/haiflow`). The file has three top level keys:
+Pipelines are defined in `pipeline.json`, which lives in `HAIFLOW_DATA_DIR` (default `/tmp/haiflow`). The file has two top level keys:
 
 - `topics`: each topic has an optional `description` and a list of `subscribers`. Every subscriber names a `session` and a `promptTemplate` that the incoming message is rendered into, plus optional `enabled` (set `false` to skip delivery) and `priority` (queue priority when the subscriber is busy).
 - `emitters`: maps a session name to the list of topics it publishes to when it finishes.
-- `pools`: worker pools for load-balancing and map-reduce. See [Worker pools](/guides/worker-pools).
 
 ```json
 {
@@ -144,7 +143,7 @@ Failed deliveries are retried automatically with exponential backoff, up to 5 at
 
 ## Publishing from outside
 
-You do not need an agent to start a chain. Inject events from n8n, scripts, or any service with `POST /publish`. The `message` you send is passed to subscriber templates as `{{message}}`.
+You do not need an agent to start a chain. Inject events from scripts or any other service with `POST /publish`. The `message` you send is passed to subscriber templates as `{{message}}`.
 
 <ParamField path="topic" type="string" required>
   The topic to publish to.
@@ -214,11 +213,8 @@ Pipelines include several guardrails so a misconfigured chain cannot run away or
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Worker pools" icon="users-gear" href="/guides/worker-pools">
-    Fan a single stage across many workers with map-reduce.
-  </Card>
-  <Card title="n8n integration" icon="diagram-project" href="/integrations/n8n">
-    Inject pipeline events from n8n with POST /publish.
+  <Card title="Pub/sub concepts" icon="tower-broadcast" href="/concepts/queueing">
+    How per-session queues drain when subscribers are busy.
   </Card>
   <Card title="API reference" icon="code" href="/api-reference/introduction">
     Full reference for the pipeline and publish endpoints.
