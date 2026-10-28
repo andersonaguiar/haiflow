@@ -822,6 +822,30 @@ describe("POST /session/stop", () => {
     expect(status).toBe(404);
     expect(data.error).toContain("not found");
   });
+
+  test("marks a session whose tmux is gone offline, so it can be removed", async () => {
+    // A session wedged busy (e.g. its tmux died in a restart) with a queued
+    // task: stop must clear it rather than 404, or remove refuses it forever.
+    writeState("dead-tmux", { status: "busy", since: new Date().toISOString(), currentTaskId: "dead-task", waiting: true });
+    writeQueue("dead-tmux", [{ id: "dead-task-2", prompt: "p", addedAt: new Date().toISOString(), dedupKey: "dead-task-2" }]);
+
+    const blocked = await api("/session/remove", "POST", { session: "dead-tmux" });
+    expect(blocked.status).toBe(409);
+
+    const stop = await api("/session/stop", "POST", { session: "dead-tmux" });
+    expect(stop.status).toBe(200);
+    expect(stop.data).toEqual({ stopped: true, session: "dead-tmux", stale: true });
+
+    const { data: state } = await api("/status?session=dead-tmux");
+    expect(state.status).toBe("offline");
+
+    // Stopping it again is a no-op 404, like any never-started session.
+    expect((await api("/session/stop", "POST", { session: "dead-tmux" })).status).toBe(404);
+
+    const removed = await api("/session/remove", "POST", { session: "dead-tmux" });
+    expect(removed.status).toBe(200);
+    expect(existsSync(`${TEST_DIR}/dead-tmux`)).toBe(false);
+  });
 });
 
 // --- SSE Streaming ---
