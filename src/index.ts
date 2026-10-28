@@ -1142,8 +1142,17 @@ function isTuiInteractive(target: string): boolean {
   return pane.stdout.toString().includes("❯");
 }
 
-function stopClaudeSession(session: string): { success: boolean; error?: string } {
+function stopClaudeSession(session: string): { success: boolean; error?: string; stale?: boolean } {
   if (!isTmuxRunning(session)) {
+    // The tmux session is gone (a service restart killed it, or it crashed) but
+    // the state still says idle/busy. There is nothing to kill, but mark it
+    // offline: otherwise /session/remove refuses it and it stays wedged forever.
+    if (readState(session).status !== "offline") {
+      setSessionId(session, null);
+      writeState(session, { status: "offline", since: new Date().toISOString() });
+      log("info", "session_stopped", { session, stale: true });
+      return { success: true, stale: true };
+    }
     return { success: false, error: `tmux session '${tmuxName(session)}' not found` };
   }
 
@@ -2289,7 +2298,7 @@ const server = Bun.serve({
         if (!result.success) {
           return Response.json({ error: result.error, session }, { status: 404 });
         }
-        return Response.json({ stopped: true, session });
+        return Response.json({ stopped: true, session, ...(result.stale ? { stale: true } : {}) });
       }),
     },
 
