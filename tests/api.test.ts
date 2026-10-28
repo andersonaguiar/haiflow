@@ -678,6 +678,51 @@ describe("POST /hooks/stop (known session)", () => {
     }
   });
 
+  test("appends last_assistant_message when the transcript has not flushed the final reply", async () => {
+    const session = "hook-stop-unflushed";
+    const claudeId = "claude-stop-unflushed-id";
+    const dir = `${TEST_DIR}/${session}`;
+    mkdirSync(`${dir}/responses`, { recursive: true });
+    writeFileSync(`${dir}/session-id`, claudeId);
+    writeFileSync(
+      `${dir}/state.json`,
+      JSON.stringify({ status: "busy", since: new Date().toISOString(), currentTaskId: "stop-unflushed-001" })
+    );
+
+    // The transcript only holds the narration before a tool call; the final
+    // reply arrives solely via the hook's last_assistant_message.
+    mkdirSync("/tmp/claude", { recursive: true });
+    const tpath = "/tmp/claude/haiflow-test-transcript-unflushed.jsonl";
+    writeFileSync(tpath, [
+      JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "read the file" }] } }),
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "I'll read the file first." }, { type: "tool_use", id: "t1", name: "Read", input: {} }] } }),
+      JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "contents" }] } }),
+    ].join("\n"));
+
+    try {
+      await api("/hooks/stop", "POST", {
+        session_id: claudeId,
+        transcript_path: tpath,
+        last_assistant_message: '{"decision":"approved"}',
+      });
+
+      const { data: resp } = await api(`/responses/stop-unflushed-001?session=${session}`);
+      expect(resp.messages).toEqual(["I'll read the file first.", '{"decision":"approved"}']);
+
+      // Once the transcript does hold the final reply, it is not duplicated.
+      writeFileSync(`${dir}/state.json`, JSON.stringify({ status: "busy", since: new Date().toISOString(), currentTaskId: "stop-unflushed-002" }));
+      writeFileSync(tpath, [
+        JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "read the file" }] } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Final." }] } }),
+      ].join("\n"));
+      await api("/hooks/stop", "POST", { session_id: claudeId, transcript_path: tpath, last_assistant_message: "Final." });
+      const { data: resp2 } = await api(`/responses/stop-unflushed-002?session=${session}`);
+      expect(resp2.messages).toEqual(["Final."]);
+    } finally {
+      if (existsSync(tpath)) unlinkSync(tpath);
+    }
+  });
+
   test("drains queue after stop", async () => {
     const session = "hook-drain";
     const claudeId = "claude-drain-test-id";

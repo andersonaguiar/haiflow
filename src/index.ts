@@ -926,6 +926,15 @@ function saveResponse(session: string, taskId: string, prompt?: string, messages
   const file = responseFile(session, taskId);
   const completed_at = new Date().toISOString();
 
+  // The Stop hook can fire before Claude Code flushes the turn's final
+  // assistant message to the transcript, so the transcript may hold only
+  // earlier narration ("I'll read the file first.") and not the reply itself.
+  // The hook's last_assistant_message is authoritative for that final message:
+  // make sure it is the last entry, since consumers read the last one first.
+  if (messages && messages.length > 0 && lastMessage && messages[messages.length - 1].trim() !== lastMessage.trim()) {
+    messages = [...messages, lastMessage];
+  }
+
   if (messages && messages.length > 0) {
     let redactions = 0;
     const safe = messages.map((m) => { const r = redactOut(String(m)); redactions += r.count; return r.text; });

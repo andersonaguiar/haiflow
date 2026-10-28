@@ -134,9 +134,9 @@ async function handleSubmit(raw: string): Promise<void> {
     await postHook("/hooks/stop", {
       session_id: SESSION_ID,
       transcript_path: transcriptPath,
-      // A deliberately different fallback string: if haiflow ever captured this
-      // instead of the transcript, the test asserting TRANSCRIPT-SOURCED fails.
-      last_assistant_message: "FALLBACK-should-not-win",
+      // Real Claude Code sends the same final text here once the transcript has
+      // it; haiflow must not duplicate it when both carry the reply.
+      last_assistant_message: transcriptReply,
     });
   } else {
     const reply = `FAKE-CLAUDE-REPLY lines=${lineCount}\n<<<PAYLOAD\n${payload}\nPAYLOAD>>>`;
