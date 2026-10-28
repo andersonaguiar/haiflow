@@ -346,9 +346,10 @@ describe("consumer lifecycle", () => {
 
       const result = await streamResponse(id);
       const text = result.messages!.join("\n");
-      // The transcript text won, not the fallback string.
+      // The transcript text was captured, and the matching
+      // last_assistant_message was not appended a second time.
       expect(text).toContain("TRANSCRIPT-SOURCED");
-      expect(text).not.toContain("FALLBACK-should-not-win");
+      expect(text.split("TRANSCRIPT-SOURCED").length - 1).toBe(1);
 
       // The ledger mined usage + model from the transcript for this task.
       const task = await api(`/tasks/${id}?session=${SESSION}`);
